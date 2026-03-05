@@ -1,5 +1,5 @@
 const API = 'http://localhost:8000/api';
-const APP_URL = 'http://localhost:5176';
+const APP_URL = 'http://3';
 const root = document.getElementById('root');
 
 // ─── State ────────────────────────────────────────────

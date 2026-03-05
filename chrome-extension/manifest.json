@@ -22,7 +22,7 @@
       "run_at": "document_idle"
     },
     {
-      "matches": ["http://localhost:5176/*"],
+      "matches": ["http://localhost:5173/*"],
       "js": ["token-bridge.js"],
       "run_at": "document_idle"
     }
