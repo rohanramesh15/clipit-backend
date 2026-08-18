@@ -83,20 +83,45 @@ def get_current_user_from_token(token: str, db: Session) -> User:
         if not email:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token has no email claim")
         metadata = payload.get("user_metadata") or {}
-        user = User(
-            email=email,
-            full_name=metadata.get("full_name") or metadata.get("name"),
-            profile_picture=metadata.get("avatar_url") or metadata.get("picture"),
-            supabase_user_id=supabase_user_id,
-        )
-        db.add(user)
-        try:
+
+        # An account with this email may already exist from before Supabase
+        # Auth (the old email/password or Google flow) — link it instead of
+        # inserting a duplicate, which would violate the email uniqueness
+        # constraint.
+        existing = db.query(User).filter(User.email == email).first()
+        if existing is not None:
+            existing.supabase_user_id = supabase_user_id
+            existing.full_name = existing.full_name or metadata.get("full_name") or metadata.get("name")
+            existing.profile_picture = existing.profile_picture or metadata.get("avatar_url") or metadata.get("picture")
             db.commit()
-        except Exception:
-            db.rollback()
-            user = db.query(User).filter(User.supabase_user_id == supabase_user_id).first()
-            if user is None:
-                raise
+            db.refresh(existing)
+            user = existing
+        else:
+            user = User(
+                email=email,
+                full_name=metadata.get("full_name") or metadata.get("name"),
+                profile_picture=metadata.get("avatar_url") or metadata.get("picture"),
+                supabase_user_id=supabase_user_id,
+            )
+            db.add(user)
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
+                # Lost a race with a concurrent request for the same subject
+                # or email — either is now linked, so re-fetch by whichever
+                # matches.
+                user = (
+                    db.query(User)
+                    .filter((User.supabase_user_id == supabase_user_id) | (User.email == email))
+                    .first()
+                )
+                if user is None:
+                    raise
+                if user.supabase_user_id != supabase_user_id:
+                    user.supabase_user_id = supabase_user_id
+                    db.commit()
+                    db.refresh(user)
     if not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
