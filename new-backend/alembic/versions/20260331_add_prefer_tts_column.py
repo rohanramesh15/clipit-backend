@@ -12,7 +12,7 @@ import sqlalchemy as sa
 
 # revision identifiers
 revision: str = 'add_prefer_tts_col'
-down_revision: Union[str, None] = 'add_card_type_col'
+down_revision: Union[str, None] = 'e8b5caa6547a'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

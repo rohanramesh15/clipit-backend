@@ -21,8 +21,15 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # Stub migration - no changes needed
-    pass
+    # Original file was lost; production already has this column from the
+    # lost migration, so guard for fresh databases that don't yet have it.
+    conn = op.get_bind()
+    result = conn.execute(sa.text(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_name='tracked_videos' AND column_name='has_english'"
+    ))
+    if result.fetchone() is None:
+        op.add_column('tracked_videos', sa.Column('has_english', sa.Boolean(), nullable=True))
 
 
 def downgrade() -> None:
