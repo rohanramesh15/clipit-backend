@@ -35,6 +35,14 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: str
 
+    # Supabase Auth (the service-role key is backend-only).
+    SUPABASE_URL: str = ""
+    SUPABASE_SERVICE_ROLE_KEY: str = ""
+
+    # Retained only so existing machine-local environment files remain valid.
+    # Google authentication is now handled by Supabase Auth.
+    GOOGLE_CLIENT_ID: str = ""
+
     # DeepL
     DEEPL_API_KEY: str = ""
 
@@ -51,9 +59,6 @@ class Settings(BaseSettings):
     RESEND_API_KEY: str = ""
     EMAIL_FROM: str = "Clip It <noreply@theclipitapp.com>"
     FRONTEND_URL: str = "https://www.theclipitapp.com"
-
-    # Google OAuth
-    GOOGLE_CLIENT_ID: str = ""
 
     # Gemini (chat, embeddings, STT, TTS)
     GEMINI_API_KEY: str = ""

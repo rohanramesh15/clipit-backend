@@ -10,7 +10,7 @@ from app.models.user import User
 def test_connection():
     """Test basic database connection"""
     print("=" * 60)
-    print("Testing Neon Database Connection")
+    print("Testing PostgreSQL Database Connection")
     print("=" * 60)
 
     # Test 1: Check if we can connect

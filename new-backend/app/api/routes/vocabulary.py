@@ -1,11 +1,10 @@
 from typing import Optional, List
 from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.security import decode_access_token
+from app.api.deps import get_current_user_optional
 from app.models.user import User
 from app.services.subtitle_service import load_cached_subtitles, load_cached_subtitles_ukrainian, load_cached_subtitles_english
 from app.services.korean_tokenizer import extract_korean_words_from_subtitles
@@ -18,31 +17,6 @@ from app.api.routes.user_vocab import get_user_vocabulary_words, get_user_priori
 from app.services.card_upgrade_service import auto_upgrade_tts_cards
 
 router = APIRouter()
-
-# Optional auth - allows both authenticated and unauthenticated requests
-optional_bearer = HTTPBearer(auto_error=False)
-
-
-def get_optional_current_user(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(optional_bearer),
-    db: Session = Depends(get_db),
-) -> Optional[User]:
-    """Get current user if authenticated, otherwise return None."""
-    if credentials is None:
-        return None
-
-    token = credentials.credentials
-    payload = decode_access_token(token)
-
-    if payload is None:
-        return None
-
-    user = db.query(User).filter(User.id == payload.get("user_id")).first()
-
-    if user is None or not user.is_active:
-        return None
-
-    return user
 
 # Cache frequency maps in memory (loaded once at first request)
 _FREQUENCY_MAP_KO: dict | None = None
@@ -74,7 +48,7 @@ async def get_vocabulary(
     apply_limits: bool = Query(False, description="Apply mining limits (cap cards per duration, enforce gaps)"),
     duration_seconds: Optional[float] = Query(None, description="Video duration in seconds (required when apply_limits=True)"),
     db: Session = Depends(get_db),
-    current_user: Optional[User] = Depends(get_optional_current_user),
+    current_user: Optional[User] = Depends(get_current_user_optional),
 ):
     """
     Extract vocabulary from cached video subtitles.
@@ -211,7 +185,7 @@ class RecordMinedWordsRequest(BaseModel):
 async def record_mined_words_endpoint(
     request: RecordMinedWordsRequest,
     db: Session = Depends(get_db),
-    current_user: Optional[User] = Depends(get_optional_current_user),
+    current_user: Optional[User] = Depends(get_current_user_optional),
 ):
     """
     Record words that were mined from a video.
@@ -244,7 +218,7 @@ async def get_mining_stats_endpoint(
     video_id: str,
     lang: str = Query('ko'),
     db: Session = Depends(get_db),
-    current_user: Optional[User] = Depends(get_optional_current_user),
+    current_user: Optional[User] = Depends(get_current_user_optional),
 ):
     """
     Get mining statistics for a video.

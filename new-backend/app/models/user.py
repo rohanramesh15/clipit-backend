@@ -1,4 +1,5 @@
 from sqlalchemy import Column, String, Boolean, DateTime
+from sqlalchemy.dialects.postgresql import UUID
 from .base import BaseModel
 
 
@@ -17,6 +18,7 @@ class User(BaseModel):
     oauth_provider = Column(String, nullable=True)  # 'google', 'github', etc.
     oauth_id = Column(String, nullable=True)  # Provider's user ID
     profile_picture = Column(String, nullable=True)  # Profile picture URL from OAuth
+    supabase_user_id = Column(UUID(as_uuid=True), unique=True, index=True, nullable=True)
 
     # Password reset
     reset_token = Column(String, nullable=True)

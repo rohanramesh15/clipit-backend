@@ -32,7 +32,7 @@ from google.genai import types as gtypes
 
 from app.core.config import settings
 from app.core.database import SessionLocal
-from app.core.security import decode_access_token
+from app.api.deps import get_current_user_from_token
 from app.models.chat import ChatSession
 from app.models.user import User
 from app.models.video import TrackedVideo
@@ -60,13 +60,10 @@ def _get_live_client() -> genai.Client:
 
 
 def _authenticate(token: str, db: Session) -> Optional[User]:
-    payload = decode_access_token(token)
-    if not payload:
+    try:
+        return get_current_user_from_token(token, db)
+    except Exception:
         return None
-    user = db.query(User).filter(User.id == payload.get("user_id")).first()
-    if not user or not user.is_active:
-        return None
-    return user
 
 
 def _video_title(db: Session, video_id: Optional[str]) -> Optional[str]:
@@ -97,7 +94,7 @@ def _build_live_config(system_instruction: str) -> dict:
 @router.websocket("/chat/voice/ws")
 async def voice_ws(
     websocket: WebSocket,
-    token: str = Query(..., description="JWT from /auth/login"),
+    token: str = Query(..., description="Supabase access token"),
     session_id: int = Query(..., description="ChatSession id created via POST /chat/session"),
 ):
     await websocket.accept()

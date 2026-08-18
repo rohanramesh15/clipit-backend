@@ -20,7 +20,7 @@ from app.models.community_group import CommunityGroup  # noqa: F401
 from app.models.community_membership import CommunityMembership  # noqa: F401
 from app.models.community_vocab_list import CommunityVocabList  # noqa: F401
 from app.models.community_vocab_word import CommunityVocabWord  # noqa: F401
-from app.api.routes import health, users
+from app.api.routes import health
 from app.api.routes.auth import router as auth_router
 from app.api.routes.videos import router as videos_router
 from app.api.routes.subtitles import router as subtitles_router
@@ -117,7 +117,6 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 app.include_router(health.router, prefix="/api", tags=["health"])
 app.include_router(auth_router, prefix="/api", tags=["auth"])
-app.include_router(users.router, prefix="/api", tags=["users"])
 app.include_router(videos_router, prefix="/api/videos", tags=["videos"])
 app.include_router(subtitles_router, prefix="/api", tags=["subtitles"])
 app.include_router(vocabulary_router, prefix="/api", tags=["vocabulary"])

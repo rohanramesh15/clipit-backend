@@ -16,8 +16,6 @@ httpx==0.28.1
 python-multipart==0.0.18
 deepl==1.28.0
 python-jose[cryptography]==3.3.0
-bcrypt==5.0.0
-google-auth==2.53.0
 
 # Anki import
 zstandard==0.23.0

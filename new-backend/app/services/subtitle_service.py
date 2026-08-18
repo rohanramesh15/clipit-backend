@@ -30,7 +30,7 @@ def save_client_youtube_subtitles(video_id: str, merged_subtitles: list, has_kor
     with open(cache_file, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-    # Also persist to Neon (best-effort)
+    # Also persist to the database (best-effort)
     try:
         save_subtitles(video_id, data)
     except Exception:
@@ -124,19 +124,19 @@ def _fetch_korean_translation(transcript_list) -> list:
 
 
 def fetch_and_cache_subtitles(video_id: str) -> dict:
-    """Fetch Korean+English subtitles, merge, cache to disk + Neon, return data."""
+    """Fetch Korean+English subtitles, merge, cache to disk and the database."""
     cache_file = _cache_path(video_id)
 
     if cache_file.exists():
         with open(cache_file, 'r', encoding='utf-8') as f:
             return json.load(f)
 
-    # Check Neon before hitting YouTube
-    neon_data = get_subtitles(video_id)
-    if neon_data:
+    # Check the database before hitting YouTube
+    database_data = get_subtitles(video_id)
+    if database_data:
         with open(cache_file, 'w', encoding='utf-8') as f:
-            json.dump(neon_data, f, ensure_ascii=False, indent=2)
-        return neon_data
+            json.dump(database_data, f, ensure_ascii=False, indent=2)
+        return database_data
 
     api = YouTubeTranscriptApi()
     transcript_list = api.list(video_id)
@@ -196,7 +196,7 @@ def fetch_and_cache_subtitles(video_id: str) -> dict:
     with open(cache_file, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-    # Also persist to Neon (best-effort)
+    # Also persist to the database (best-effort)
     try:
         save_subtitles(video_id, data)
     except Exception:
@@ -232,12 +232,12 @@ def check_korean_available(video_id: str) -> bool:
 
 
 def load_cached_subtitles(video_id: str) -> dict | None:
-    """Load from local file cache, then Neon, no network call."""
+    """Load from local file cache, then the database, with no network call."""
     cache_file = _cache_path(video_id)
     if cache_file.exists():
         with open(cache_file, 'r', encoding='utf-8') as f:
             return json.load(f)
-    # Fallback: check Neon
+    # Fallback: check the database
     return get_subtitles(video_id)
 
 
@@ -352,7 +352,7 @@ def fetch_and_cache_subtitles_ukrainian(video_id: str) -> dict:
     with open(cache_file, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-    # Also persist to Neon (best-effort) using the dedicated Ukrainian column
+    # Also persist to the database (best-effort) using the dedicated Ukrainian column
     try:
         save_subtitles_ukrainian(video_id, data)
     except Exception:
@@ -388,7 +388,7 @@ def check_ukrainian_available(video_id: str) -> bool:
 
 
 def load_cached_subtitles_ukrainian(video_id: str) -> dict | None:
-    """Load Ukrainian subtitle cache from disk, then dedicated Neon column fallback."""
+    """Load Ukrainian subtitle cache from disk, then the dedicated column fallback."""
     cache_file = _cache_path_uk(video_id)
     if cache_file.exists():
         with open(cache_file, 'r', encoding='utf-8') as f:
@@ -504,7 +504,7 @@ def save_subtitles_from_extension(video_id: str, lang: str, subtitles: list, has
         with open(cache_file, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
-        # Also save to Neon database (best-effort), only when we have actual content.
+        # Also save to the database (best-effort), only when we have actual content.
         # Use separate columns so Korean and Ukrainian never overwrite each other.
         if subtitles:
             try:

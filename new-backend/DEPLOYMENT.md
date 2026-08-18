@@ -29,22 +29,15 @@ When prompted:
 - Choose your region (default: Boston/bos)
 - Do NOT deploy yet (we need to set secrets first)
 
-### 3. Create a PostgreSQL database (recommended)
+### 3. Create a Supabase PostgreSQL project
 
-Fly.io provides free PostgreSQL databases. Create one:
+Create a Supabase project in the [Supabase dashboard](https://supabase.com/dashboard/projects). For production, copy its **Session pooler** connection string from **Connect**. It must use:
 
-```bash
-flyctl postgres create --name deadbird-db --region bos
-```
+- the pooler hostname (`*.pooler.supabase.com`), which is IPv4-compatible;
+- port `5432`; and
+- the `postgres.<project-ref>` username.
 
-Then attach it to your app:
-```bash
-flyctl postgres attach deadbird-db
-```
-
-This will automatically set the `DATABASE_URL` environment variable.
-
-**Alternative:** If you want to use SQLite for now, you'll need to set DATABASE_URL manually (see step 4).
+Do not use the Direct connection (IPv6-only on the free tier) or the Transaction pooler on port `6543`.
 
 ### 4. Set required secrets
 
@@ -52,8 +45,9 @@ This will automatically set the `DATABASE_URL` environment variable.
 # Generate a secure secret key
 flyctl secrets set SECRET_KEY=$(openssl rand -hex 32)
 
-# If using SQLite instead of Postgres
-flyctl secrets set DATABASE_URL="sqlite:///./deadbird.db"
+# Use the Supabase Session pooler URL from the dashboard.
+# Keep this value out of source control and shell history where possible.
+flyctl secrets set DATABASE_URL="postgresql://postgres.<project-ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres"
 
 # Optional: DeepL API key if you use translation features
 flyctl secrets set DEEPL_API_KEY="your-deepl-api-key"
@@ -136,8 +130,8 @@ flyctl vm status
 ## Important Notes
 
 1. **Database Choice:**
-   - SQLite works but data will be lost when the machine restarts
-   - PostgreSQL is recommended for production (use `flyctl postgres create`)
+   - Production uses Supabase PostgreSQL through its Session pooler.
+   - Local development uses the Docker PostgreSQL container; do not point it at the production database.
 
 2. **CORS Configuration:**
    - Update `ALLOWED_ORIGINS` secret with your production frontend URL
