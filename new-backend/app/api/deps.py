@@ -65,11 +65,13 @@ def verify_supabase_token(token: str) -> dict:
         )
 
 
-def get_current_user_from_token(token: str, db: Session) -> User:
+def get_current_user_from_token(token: str, db: Session) -> tuple[User, bool]:
     """Return the app user mapped to a verified Supabase Auth subject.
 
     The first authenticated API request creates the local row, preserving the
-    integer primary key expected by all existing application tables.
+    integer primary key expected by all existing application tables. The
+    second element of the returned tuple is True only when this call is the
+    one that created (or first-linked) the row.
     """
     payload = verify_supabase_token(token)
     try:
@@ -77,6 +79,7 @@ def get_current_user_from_token(token: str, db: Session) -> User:
     except (KeyError, TypeError, ValueError):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token subject")
 
+    is_new = False
     user = db.query(User).filter(User.supabase_user_id == supabase_user_id).first()
     if user is None:
         email = payload.get("email")
@@ -97,6 +100,7 @@ def get_current_user_from_token(token: str, db: Session) -> User:
             db.refresh(existing)
             user = existing
         else:
+            is_new = True
             user = User(
                 email=email,
                 full_name=metadata.get("full_name") or metadata.get("name"),
@@ -110,7 +114,7 @@ def get_current_user_from_token(token: str, db: Session) -> User:
                 db.rollback()
                 # Lost a race with a concurrent request for the same subject
                 # or email — either is now linked, so re-fetch by whichever
-                # matches.
+                # matches. Still the same signup event, so is_new stays True.
                 user = (
                     db.query(User)
                     .filter((User.supabase_user_id == supabase_user_id) | (User.email == email))
@@ -128,14 +132,15 @@ def get_current_user_from_token(token: str, db: Session) -> User:
             detail="User not found or inactive",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    return user
+    return user, is_new
 
 
 def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
     db: Session = Depends(get_db),
 ) -> User:
-    return get_current_user_from_token(credentials.credentials, db)
+    user, _is_new = get_current_user_from_token(credentials.credentials, db)
+    return user
 
 
 def get_current_user_optional(
@@ -147,6 +152,17 @@ def get_current_user_optional(
         return None
 
     try:
-        return get_current_user_from_token(credentials.credentials, db)
+        user, _is_new = get_current_user_from_token(credentials.credentials, db)
+        return user
     except HTTPException:
         return None
+
+
+def get_current_user_with_new_flag(
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    db: Session = Depends(get_db),
+) -> tuple[User, bool]:
+    """Same as get_current_user, but also reports whether this call is what
+    created the local row — used by /auth/me to tell the frontend whether to
+    route a Supabase-redirect sign-in through onboarding."""
+    return get_current_user_from_token(credentials.credentials, db)

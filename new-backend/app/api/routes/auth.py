@@ -4,7 +4,7 @@ from urllib.request import Request, urlopen
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_current_user_with_new_flag
 from app.core.config import settings
 from app.core.database import get_db
 from app.models.deck_settings import DeckSettings
@@ -23,9 +23,16 @@ router = APIRouter()
 
 
 @router.get("/auth/me", response_model=UserResponse)
-def me(current_user: User = Depends(get_current_user)):
-    """Return the local profile mapped to the verified Supabase Auth user."""
-    return current_user
+def me(current_user_and_flag: tuple[User, bool] = Depends(get_current_user_with_new_flag)):
+    """Return the local profile mapped to the verified Supabase Auth user.
+
+    is_new_user is True only on the request that just created the local row —
+    the frontend uses it to route a fresh Supabase sign-in (including the
+    Google redirect flow, which discards any page-local navigation state)
+    through onboarding instead of straight into the app.
+    """
+    current_user, is_new = current_user_and_flag
+    return UserResponse.model_validate(current_user, from_attributes=True).model_copy(update={"is_new_user": is_new})
 
 
 def _delete_supabase_user(supabase_user_id: str) -> None:

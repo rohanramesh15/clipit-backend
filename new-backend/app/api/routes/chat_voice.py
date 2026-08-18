@@ -61,7 +61,8 @@ def _get_live_client() -> genai.Client:
 
 def _authenticate(token: str, db: Session) -> Optional[User]:
     try:
-        return get_current_user_from_token(token, db)
+        user, _is_new = get_current_user_from_token(token, db)
+        return user
     except Exception:
         return None
 

@@ -21,6 +21,7 @@ class UserResponse(BaseModel):
     is_superuser: bool
     created_at: datetime
     updated_at: datetime
+    is_new_user: bool = False
 
     class Config:
         from_attributes = True
