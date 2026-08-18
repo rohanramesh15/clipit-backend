@@ -30,6 +30,7 @@ class Settings(BaseSettings):
         "https://project-deadbird-frontend.fly.dev",
         "https://theclipitapp.com",
         "https://www.theclipitapp.com",
+        "https://clipit-sable.vercel.app",
     ]
 
     # Database
