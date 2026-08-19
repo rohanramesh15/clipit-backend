@@ -63,6 +63,14 @@ async def track_video(
 
     # Update global subtitle-availability flags
     is_new = add_video(req.video_id, req.title, req.season, req.episode, req.episode_title)
+    # add_video() never updates the title on an existing record (only
+    # season/episode). The extension often tracks a video twice — once
+    # immediately with the "Unknown" placeholder, then again once the
+    # content script resolves the real title — so backfill it here whenever
+    # a non-generic title comes in. update_video_title() only overwrites a
+    # still-generic title, so this is safe to call unconditionally.
+    if not is_new and req.title and req.title != "Unknown":
+        update_video_title(req.video_id, req.title)
     if req.caption_languages:
         has_ko = any(l == 'ko' or l.startswith('ko-') for l in req.caption_languages)
         has_uk = any(l == 'uk' or l.startswith('uk-') for l in req.caption_languages)
