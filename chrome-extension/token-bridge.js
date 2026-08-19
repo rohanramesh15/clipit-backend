@@ -1,14 +1,23 @@
 /**
  * token-bridge.js — content script injected into the ClipIt frontend.
- * Reads the JWT from localStorage and syncs it into chrome.storage.local so that
- * the background service worker and popup can attach it to authenticated API requests.
+ * Reads the Supabase session from localStorage and syncs its access token into
+ * chrome.storage.local so that the background service worker and popup can
+ * attach it to authenticated API requests.
+ *
+ * The frontend uses Supabase for auth (see clipit-frontend/src/lib/supabaseClient.ts)
+ * and Supabase's client persists the session itself under a fixed key derived
+ * from the project ref, not a key this app chooses — see SUPABASE_AUTH_KEY below.
  *
  * The `storage` event only fires in OTHER windows, not the window that called setItem.
  * So we poll every second to catch same-window login/logout events.
  *
  * Injected into:
- * - https://theclipitapp.com/* (production)
+ * - https://clipit-sable.vercel.app/* (production)
  */
+
+// Supabase project ref is pyvyjdzwjgdbainzoiug (clipit-frontend/.env.production);
+// the JS client always stores the session under `sb-<project-ref>-auth-token`.
+const SUPABASE_AUTH_KEY = 'sb-pyvyjdzwjgdbainzoiug-auth-token';
 
 let lastSynced = null;
 let lastTheme = null;
@@ -27,11 +36,22 @@ function stopSyncingAfterReload(error) {
   }
 }
 
+function readSupabaseAccessToken() {
+  const raw = localStorage.getItem(SUPABASE_AUTH_KEY);
+  if (!raw) return null;
+  try {
+    const session = JSON.parse(raw);
+    return session?.access_token || null;
+  } catch (error) {
+    console.warn('[ClipIt] Failed to parse Supabase session', error);
+    return null;
+  }
+}
+
 function syncToken() {
   try {
     if (!extensionStorageAvailable()) return;
-    // Check both localStorage and sessionStorage (for "Remember me" off)
-    const token = localStorage.getItem('deadbird_token') || sessionStorage.getItem('deadbird_token') || null;
+    const token = readSupabaseAccessToken();
     if (token === lastSynced) return; // nothing changed
     lastSynced = token;
     if (token) {

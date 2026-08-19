@@ -8,7 +8,7 @@
     "*://www.youtube.com/*",
     "*://www.netflix.com/*",
     "https://project-deadbird-backend.fly.dev/*",
-    "https://project-deadbird-frontend.fly.dev/*",
+    "https://clipit-sable.vercel.app/*",
     "http://localhost:8000/*",
     "http://127.0.0.1:8000/*",
     "http://localhost:5176/*"
@@ -28,7 +28,7 @@
       "run_at": "document_idle"
     },
     {
-      "matches": ["https://project-deadbird-frontend.fly.dev/*", "http://localhost:5176/*"],
+      "matches": ["https://clipit-sable.vercel.app/*", "http://localhost:5176/*"],
       "js": ["token-bridge.js"],
       "run_at": "document_idle"
     }
