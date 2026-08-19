@@ -12,10 +12,9 @@ from app.services.video_store import (
     get_ukrainian_filtered_videos, get_unchecked_ukrainian_videos,
     update_ukrainian_status, get_total_watch_time, update_video_title,
     get_english_filtered_videos, get_unchecked_english_videos, update_english_status,
-    add_user_watch, get_user_videos, get_user_filtered_videos, get_user_unchecked_videos,
+    add_user_watch, get_user_videos, get_user_filtered_videos,
     delete_user_video, add_watch_time,
 )
-from app.services.subtitle_service import check_korean_available, check_ukrainian_available, check_english_available
 
 router = APIRouter()
 
@@ -104,23 +103,14 @@ async def get_filtered_history(
 ):
     """
     Return the current user's videos that have subtitles in the target language.
-    Lazily checks unchecked videos on each request.
-    """
-    # Check unchecked videos for this user's library
-    unchecked = get_user_unchecked_videos(db, current_user.id, lang)
-    if lang == "uk":
-        for video in unchecked:
-            has_uk = check_ukrainian_available(video["video_id"])
-            update_ukrainian_status(video["video_id"], has_uk)
-    elif lang == "en":
-        for video in unchecked:
-            has_en = check_english_available(video["video_id"])
-            update_english_status(video["video_id"], has_en)
-    else:
-        for video in unchecked:
-            has_korean = check_korean_available(video["video_id"])
-            update_korean_status(video["video_id"], has_korean)
 
+    Availability is recorded when the extension tracks a video.  Older videos
+    may have an unknown (NULL) status and are intentionally included by
+    ``get_user_filtered_videos``.  Do not probe YouTube here: a history read is
+    also made while navigating to Home, and synchronously checking every
+    unknown video can block the single API worker long enough to stall the
+    whole app.
+    """
     videos = get_user_filtered_videos(db, current_user.id, lang)
     return {"total": len(videos), "lang": lang, "videos": videos}
 
