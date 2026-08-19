@@ -6,7 +6,7 @@
   "permissions": ["storage", "scripting", "tabCapture", "offscreen", "activeTab"],
   "host_permissions": [
     "*://www.youtube.com/*",
-    "*://www.netflix.com/*",
+    "*://www.netflix.com/watch/*",
     "https://project-deadbird-backend.fly.dev/*",
     "https://clipit-sable.vercel.app/*",
     "http://localhost:8000/*",
@@ -48,10 +48,6 @@
     "128": "icons/128.png"
   },
   "web_accessible_resources": [
-    {
-      "resources": ["inject.js"],
-      "matches": ["*://*.netflix.com/*"]
-    },
     {
       "resources": ["youtube-inject.js"],
       "matches": ["*://*.youtube.com/*"]
