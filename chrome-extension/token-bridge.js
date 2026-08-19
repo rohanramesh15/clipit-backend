@@ -20,7 +20,6 @@
 const SUPABASE_AUTH_KEY = 'sb-pyvyjdzwjgdbainzoiug-auth-token';
 
 let lastSynced = null;
-let lastTheme = null;
 let lastLanguage = null;
 let syncInterval = null;
 
@@ -66,26 +65,16 @@ function syncToken() {
   }
 }
 
-function syncPreferences() {
+function syncLanguage() {
   try {
     if (!extensionStorageAvailable()) return;
-    const theme = localStorage.getItem('theme') === 'light' ? 'light' : 'dark';
     const storedLanguage = localStorage.getItem('deadbird_language');
     const language = ['ko', 'uk'].includes(storedLanguage) ? storedLanguage : 'ko';
 
-    const updates = {};
-    if (theme !== lastTheme) {
-      updates.theme = theme;
-      lastTheme = theme;
-    }
     if (language !== lastLanguage) {
-      updates.language = language;
       lastLanguage = language;
-    }
-
-    if (Object.keys(updates).length) {
-      chrome.storage.local.set(updates);
-      console.log('[ClipIt] Preferences synced to extension storage', updates);
+      chrome.storage.local.set({ language });
+      console.log('[ClipIt] Language synced to extension storage', language);
     }
   } catch (error) {
     stopSyncingAfterReload(error);
@@ -94,10 +83,10 @@ function syncPreferences() {
 
 // Sync immediately on page load
 syncToken();
-syncPreferences();
+syncLanguage();
 
 // Poll every second to catch same-window login/logout
 syncInterval = setInterval(() => {
   syncToken();
-  syncPreferences();
+  syncLanguage();
 }, 1000);

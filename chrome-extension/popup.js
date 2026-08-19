@@ -15,7 +15,6 @@ let state = {
   lang: 'ko',        // 'ko' | 'uk'
   deleteConfirm: null, // { video_id, title } | null
   isDeleting: false,
-  theme: 'dark',     // 'dark' | 'light'
 };
 
 // Supported learning languages and their display metadata.
@@ -27,35 +26,20 @@ const normalizeLang = (l) => (SUPPORTED_LANGUAGES.includes(l) ? l : 'ko');
 // ─── Boot ─────────────────────────────────────────────
 (async function init() {
   // Load persisted preferences
-  const stored = await chrome.storage.local.get(['language', 'theme', 'hideSubtitles']);
+  const stored = await chrome.storage.local.get(['language', 'hideSubtitles']);
   state.lang = normalizeLang(stored.language);
-  state.theme = stored.theme === 'light' ? 'light' : 'dark';
   state.hideSubtitles = stored.hideSubtitles === true;
-
-  // Apply theme to body
-  document.body.classList.toggle('light', state.theme === 'light');
 
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
 
-    let shouldRefetch = false;
-    if (changes.theme) {
-      state.theme = changes.theme.newValue === 'light' ? 'light' : 'dark';
-      document.body.classList.toggle('light', state.theme === 'light');
-    }
     if (changes.language) {
       state.lang = normalizeLang(changes.language.newValue);
       state.selected = null;
       state.words = null;
-      shouldRefetch = true;
-    }
-
-    if (shouldRefetch) {
       state.view = 'loading';
       render();
       fetchVideos();
-    } else if (changes.theme) {
-      render();
     }
   });
 
@@ -344,7 +328,7 @@ function tmplList() {
           : `<img class="video-thumb"
               src="${thumbUrl}"
               alt=""
-              onerror="this.style.background='#2A242C';this.style.border='1px solid rgba(247,241,234,0.09)'"
+              onerror="this.style.background='#eeeef1';this.style.border='1px solid #fcf6ed'"
             >${platformBadge}`
         }
         <div class="video-meta">
