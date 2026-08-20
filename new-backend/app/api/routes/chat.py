@@ -13,6 +13,7 @@ Endpoints:
 import json
 import time
 from datetime import datetime
+from functools import lru_cache
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Body, Query, UploadFile, File, Form
@@ -588,6 +589,70 @@ def list_tts_voices(current_user: User = Depends(get_current_user)):
     }
 
 
+def _wrap_pcm_as_wav(pcm_bytes: bytes) -> bytes:
+    """Wrap raw PCM (24kHz, mono, 16-bit — Gemini TTS output) as a WAV so browsers can play it directly."""
+    import struct
+    sample_rate = 24000
+    num_channels = 1
+    bits_per_sample = 16
+    byte_rate = sample_rate * num_channels * bits_per_sample // 8
+    block_align = num_channels * bits_per_sample // 8
+    data_size = len(pcm_bytes)
+    wav_header = (
+        b"RIFF"
+        + struct.pack("<I", 36 + data_size)
+        + b"WAVE"
+        + b"fmt "
+        + struct.pack("<I", 16)
+        + struct.pack("<H", 1)              # PCM
+        + struct.pack("<H", num_channels)
+        + struct.pack("<I", sample_rate)
+        + struct.pack("<I", byte_rate)
+        + struct.pack("<H", block_align)
+        + struct.pack("<H", bits_per_sample)
+        + b"data"
+        + struct.pack("<I", data_size)
+    )
+    return wav_header + pcm_bytes
+
+
+# Short greeting read aloud to preview a voice in Settings, in each learning language.
+VOICE_SAMPLE_TEXT = {
+    "ko": "안녕하세요! 오늘도 함께 연습해봐요.",
+    "uk": "Привіт! Сьогодні потренуємося разом.",
+}
+
+
+@lru_cache(maxsize=32)
+def _synthesize_voice_sample(voice_name: str, lang: str) -> bytes:
+    """Generate a short TTS preview clip for a voice. Cached in-process — there are only
+    len(ALLOWED_TTS_VOICES) * len(VOICE_SAMPLE_TEXT) possible inputs, so this never grows."""
+    text = VOICE_SAMPLE_TEXT.get(lang, VOICE_SAMPLE_TEXT["ko"])
+    return synthesize_tts(text, voice_name=voice_name)
+
+
+@router.get("/chat/voices/{voice_id}/sample")
+def get_voice_sample(
+    voice_id: str,
+    lang: str = Query("ko"),
+    current_user: User = Depends(get_current_user),
+):
+    """Generate (and cache) a short TTS preview clip for a voice, used in Settings."""
+    if voice_id not in ALLOWED_TTS_VOICES:
+        raise HTTPException(status_code=404, detail="Unknown voice")
+
+    try:
+        audio_bytes = _synthesize_voice_sample(voice_id, lang)
+    except Exception as e:
+        print(f"[chat] Voice sample TTS failed: {e}")
+        raise HTTPException(status_code=500, detail="TTS generation failed")
+
+    if not audio_bytes:
+        raise HTTPException(status_code=500, detail="TTS returned no audio")
+
+    return Response(content=_wrap_pcm_as_wav(audio_bytes), media_type="audio/wav")
+
+
 @router.get("/chat/audio/{turn_id}")
 def get_turn_audio(
     turn_id: int,
@@ -623,29 +688,6 @@ def get_turn_audio(
     if not audio_bytes:
         raise HTTPException(status_code=500, detail="TTS returned no audio")
 
-    # Wrap raw PCM (24kHz, mono, 16-bit) as a WAV so browsers can play it directly
-    import struct
-    sample_rate = 24000
-    num_channels = 1
-    bits_per_sample = 16
-    byte_rate = sample_rate * num_channels * bits_per_sample // 8
-    block_align = num_channels * bits_per_sample // 8
-    data_size = len(audio_bytes)
-    wav_header = (
-        b"RIFF"
-        + struct.pack("<I", 36 + data_size)
-        + b"WAVE"
-        + b"fmt "
-        + struct.pack("<I", 16)
-        + struct.pack("<H", 1)              # PCM
-        + struct.pack("<H", num_channels)
-        + struct.pack("<I", sample_rate)
-        + struct.pack("<I", byte_rate)
-        + struct.pack("<H", block_align)
-        + struct.pack("<H", bits_per_sample)
-        + b"data"
-        + struct.pack("<I", data_size)
-    )
-    return Response(content=wav_header + audio_bytes, media_type="audio/wav")
+    return Response(content=_wrap_pcm_as_wav(audio_bytes), media_type="audio/wav")
 
 
