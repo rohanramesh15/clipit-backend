@@ -18,7 +18,7 @@ services:
 
   backend:
     build:
-      context: ./new-backend
+      context: .
       dockerfile: Dockerfile
     container_name: deadbird-backend
     environment:
@@ -33,10 +33,10 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./new-backend:/app # For live reloading during development (optional)
+      - ./:/app # For live reloading during development (optional)
       - /app/__pycache__ # Don't sync pycache back to host
     env_file:
-      - ./new-backend/.env
+      - ./.env
 
 volumes:
   postgres_data:

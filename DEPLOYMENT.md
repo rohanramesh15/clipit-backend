@@ -17,7 +17,7 @@
 cd project-deadbird-backend
 ```
 
-**Note:** The `fly.toml` is at the repository root and configured to build from the `new-backend` subdirectory.
+**Note:** The `fly.toml` and active FastAPI application are both at this backend root.
 
 ### 2. Launch the app (first time only)
 ```bash

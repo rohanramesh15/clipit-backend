@@ -16,11 +16,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
-COPY new-backend/requirements.txt .
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the application code from new-backend
-COPY new-backend/ .
+# Copy the rest of the application code
+COPY . .
 
 # Make start.sh executable
 RUN chmod +x /app/start.sh

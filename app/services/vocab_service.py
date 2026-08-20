@@ -16,7 +16,7 @@ LANGUAGE_PARTICLES = {
     'en': ['the', 'be', 'to', 'of', 'and', 'a', 'in', 'that', 'have', 'i', 'it', 'for', 'not', 'on', 'with', 'he', 'as', 'you', 'do', 'at', 'this', 'but', 'his', 'by', 'from', 'they', 'we', 'say', 'her', 'she', 'or', 'an'],
 }
 
-# Path relative to the new-backend root (where main.py lives)
+# Path relative to the backend root (where main.py lives)
 _DATA_DIR = Path(__file__).parent.parent.parent / 'data'
 
 

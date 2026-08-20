@@ -6,9 +6,10 @@ A FastAPI backend for the Deadbird language learning application. Learn language
 
 ```
 .
-├── new-backend/          # Main FastAPI backend
+├── app/                  # Main FastAPI application
+├── alembic/              # Database migrations
+├── data/                 # Local backend data
 ├── chrome-extension/     # Browser extension for Netflix integration
-├── prev-backend/         # Legacy backend (deprecated)
 └── docker-compose.yml    # Docker configuration
 ```
 
@@ -23,10 +24,10 @@ A FastAPI backend for the Deadbird language learning application. Learn language
 - **Deck Management**: Organize flashcards into custom decks
 - **Chrome Extension**: Netflix subtitle integration
 
-## Project Structure (new-backend)
+## Project Structure
 
 ```
-new-backend/
+.
 ├── app/
 │   ├── api/routes/       # API endpoints
 │   │   ├── auth.py       # Authentication
@@ -60,9 +61,9 @@ new-backend/
 
 ### Installation
 
-1. Navigate to the backend directory:
+1. From the monorepo root, navigate to the backend directory:
 ```bash
-cd new-backend
+cd clipit-backend
 ```
 
 2. Create and activate a virtual environment:
@@ -91,13 +92,13 @@ DEEPL_API_KEY=your-deepl-key
 
 ### Development
 ```bash
-cd new-backend
+cd clipit-backend
 python main.py
 ```
 
 ### Production
 ```bash
-cd new-backend
+cd clipit-backend
 uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
 ```
 
