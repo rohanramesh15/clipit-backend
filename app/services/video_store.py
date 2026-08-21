@@ -92,14 +92,15 @@ def update_video_title(video_id: str, title: str) -> bool:
         db.close()
 
 
-def save_subtitles(video_id: str, subtitle_data: dict) -> None:
-    """Store Korean subtitle JSON for the tracked video."""
+def save_subtitles(video_id: str, subtitle_data: dict) -> bool:
+    """Store subtitle JSON for a tracked video and report whether it persisted."""
     db = _db()
     try:
-        db.query(TrackedVideo).filter(TrackedVideo.video_id == video_id).update(
+        updated = db.query(TrackedVideo).filter(TrackedVideo.video_id == video_id).update(
             {"subtitles": subtitle_data}
         )
         db.commit()
+        return bool(updated)
     finally:
         db.close()
 
@@ -116,14 +117,15 @@ def get_subtitles(video_id: str) -> dict | None:
         db.close()
 
 
-def save_subtitles_ukrainian(video_id: str, subtitle_data: dict) -> None:
-    """Store Ukrainian subtitle JSON in its own column for the tracked video."""
+def save_subtitles_ukrainian(video_id: str, subtitle_data: dict) -> bool:
+    """Store Ukrainian subtitle JSON and report whether it persisted."""
     db = _db()
     try:
-        db.query(TrackedVideo).filter(TrackedVideo.video_id == video_id).update(
+        updated = db.query(TrackedVideo).filter(TrackedVideo.video_id == video_id).update(
             {"subtitles_uk": subtitle_data}
         )
         db.commit()
+        return bool(updated)
     finally:
         db.close()
 

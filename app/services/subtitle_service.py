@@ -509,11 +509,14 @@ def save_subtitles_from_extension(video_id: str, lang: str, subtitles: list, has
         if subtitles:
             try:
                 if lang == 'uk':
-                    save_subtitles_ukrainian(video_id, data)
+                    persisted = save_subtitles_ukrainian(video_id, data)
                 else:
-                    save_subtitles(video_id, data)
+                    persisted = save_subtitles(video_id, data)
+                if not persisted:
+                    print(f"Failed to persist subtitles: tracked video {video_id} does not exist")
+                    return False
             except Exception:
-                pass
+                return False
 
         # Update video language status in database
         from app.services.video_store import update_korean_status, update_ukrainian_status, update_english_status

@@ -44,13 +44,15 @@ async def receive_youtube_subtitles(req: YouTubeSubtitlesRequest):
         )
 
         # Save to the language-specific cache and update video language status.
-        save_subtitles_from_extension(
+        persisted = save_subtitles_from_extension(
             req.video_id,
             lang,
             merged,
             has_korean=has_korean,
             has_ukrainian=has_ukrainian,
         )
+        if not persisted:
+            raise HTTPException(status_code=500, detail="Subtitle upload could not be persisted")
 
         return {
             "success": True,
@@ -209,6 +211,8 @@ async def upload_subtitles(data: SubtitleUpload):
             has_korean=data.has_korean,
             has_ukrainian=data.has_ukrainian,
         )
+        if not result:
+            raise HTTPException(status_code=500, detail="Subtitle upload could not be persisted")
 
         return {
             "status": "ok",

@@ -808,6 +808,7 @@ async function trackAndPrefetch(videoId, title, lang = 'ko') {
 
 async function runVocabPipeline(videoId, lang = 'ko') {
   console.log(`[ClipIt] runVocabPipeline starting: ${videoId} (${lang})`);
+  const token = await getAuthToken();
   const cacheKey = `vocab_${lang}_${videoId}`;
 
   // Check if we have a recent cache
@@ -844,11 +845,13 @@ async function runVocabPipeline(videoId, lang = 'ko') {
         return;
       }
 
-      // Upload subtitles to backend for storage
+      // Upload captions before marking the video ready. Home relies on the
+      // durable upload, not merely on the browser finding a caption track.
+      let uploaded = false;
       try {
         const uploadRes = await fetch(`${API}/subtitles/upload`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: authHeaders(token),
           body: JSON.stringify({
             video_id: videoId,
             lang: lang,
@@ -858,6 +861,7 @@ async function runVocabPipeline(videoId, lang = 'ko') {
         });
 
         if (uploadRes.ok) {
+          uploaded = true;
           console.log(`[Deadbird] Uploaded ${subtitles.length} subtitles to backend`);
         } else {
           console.error('[Deadbird] Failed to upload subtitles:', await uploadRes.text());
@@ -866,8 +870,9 @@ async function runVocabPipeline(videoId, lang = 'ko') {
         console.error('[Deadbird] Error uploading subtitles:', uploadError);
       }
 
-      // Language exists even if no words match the frequency list later.
-      await updateStatus(videoId, lang, true);
+      // Do not advertise captions as ready if their durable upload failed.
+      await updateStatus(videoId, lang, uploaded);
+      if (!uploaded) throw new Error('subtitle upload');
     }
 
     // Step 2: vocabulary (all words in freq list, no level filter)

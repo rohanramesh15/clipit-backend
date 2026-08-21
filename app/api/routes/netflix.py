@@ -147,6 +147,20 @@ async def save_netflix_subtitles(request: dict = Body(...)):
     with open(cache_file, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
+    # The local cache is only a speed optimization. Fly machines have separate
+    # ephemeral filesystems, so retain the source payload in Postgres as well
+    # or a later Home request can no longer mine an already watched episode.
+    try:
+        from app.services.video_store import save_subtitles, save_subtitles_ukrainian
+        if language == "uk":
+            persisted = save_subtitles_ukrainian(video_id, data)
+        else:
+            persisted = save_subtitles(video_id, data)
+        if not persisted:
+            raise RuntimeError(f"tracked video {video_id} does not exist")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to persist Netflix subtitles: {e}")
+
     # Calculate and save video duration from last subtitle
     if clean_subtitles:
         last_sub = clean_subtitles[-1]
@@ -423,7 +437,7 @@ async def get_netflix_thumbnail(video_id: str):
 
 
 def load_cached_netflix_subtitles(video_id: str, lang: str = "ko") -> dict | None:
-    """Load Netflix subtitles from cache (for use by vocabulary service)."""
+    """Load Netflix subtitles from cache, then durable database storage."""
     cache_file = get_netflix_cache_path(video_id, lang)
     if cache_file.exists():
         with open(cache_file, "r", encoding="utf-8") as f:
@@ -440,4 +454,8 @@ def load_cached_netflix_subtitles(video_id: str, lang: str = "ko") -> dict | Non
                     sub["duration"] = normalize_timestamp(sub["duration"])
 
         return data
-    return None
+    # Fly may route a request to a different Machine (or the original Machine
+    # may have restarted), so local cache absence must not erase a watched
+    # episode's vocabulary source.
+    from app.services.video_store import get_subtitles, get_subtitles_ukrainian
+    return get_subtitles_ukrainian(video_id) if lang == "uk" else get_subtitles(video_id)

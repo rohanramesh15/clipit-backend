@@ -9,6 +9,7 @@ from app.api.deps import get_current_user
 from app.models.user import User
 from app.models.user_vocabulary_list import UserVocabularyList
 from app.models.user_vocabulary_word import UserVocabularyWord
+from app.models.user_flashcard_progress import UserFlashcardProgress
 from app.services.video_store import (
     add_video, get_all_videos, get_filtered_videos,
     get_unchecked_videos, update_korean_status,
@@ -105,11 +106,11 @@ async def get_home_queue(
         for word in uploaded_words
     ]
 
-    candidate_videos = get_user_filtered_videos(db, current_user.id, lang)
-    # Keep the watched-video count in the response even when none of those
-    # videos can produce a card yet.  The client uses it to distinguish
-    # "nothing watched" from "captions/cards are still being prepared".
-    source_video_count = len(candidate_videos)
+    # A Home queue must be based on durable user data. Caption-status flags
+    # are only hints from the extension; a flag alone does not prove that the
+    # subtitle payload made it to persistent storage.
+    all_watched_videos = get_user_videos(db, current_user.id)
+    source_video_count = len(all_watched_videos)
 
     # The fast Home path must not let a handful of brand-new, still-processing
     # watches hide vocabulary that is already available from an older video.
@@ -120,12 +121,22 @@ async def get_home_queue(
         "uk": "has_ukrainian",
         "en": "has_english",
     }.get(lang, "has_korean")
+    candidate_videos = [
+        video for video in all_watched_videos
+        if video.get(language_status_key) is not False
+    ]
     videos = sorted(
         candidate_videos,
         key=lambda video: video.get(language_status_key) is True,
         reverse=True,
     )[:HOME_QUEUE_VIDEO_LIMIT]
-    preparing_video_ids: set[str] = set()
+    # There is no server-side preparation job. Track sources that cannot be
+    # read durably instead of falsely telling the learner to wait for work
+    # that will never occur without the extension re-uploading captions.
+    unavailable_video_ids = {
+        video["video_id"] for video in all_watched_videos
+        if video.get(language_status_key) is False
+    }
     card_jobs: list[tuple[str, str, str, dict]] = []
     # The Home list only needs a word and a short meaning. Do not make it wait
     # for the heavier sentence/context enrichment used by a review session.
@@ -133,6 +144,33 @@ async def get_home_queue(
     # clear fallback while the dedicated practice flow enriches them later.
     definitions = load_definitions()
     user_definitions = load_user_definitions()
+    watched_titles = {video["video_id"]: video["title"] for video in all_watched_videos}
+
+    # Previously reviewed cards are already durable, usable practice content.
+    # Do not hide them just because the source video's subtitle cache is no
+    # longer available (for example, after a Fly machine restart).
+    saved_cards = (
+        db.query(UserFlashcardProgress)
+        .filter(
+            UserFlashcardProgress.user_id == current_user.id,
+            UserFlashcardProgress.language == lang,
+        )
+        .all()
+    )
+    for saved_card in saved_cards:
+        word = saved_card.lemma or saved_card.word
+        cards.append({
+            "target_word": word,
+            "dictionary_form": word,
+            "english": (
+                user_definitions.get(f"{lang}:{word}")
+                or definitions.get(word)
+                or "Translation available when you start practicing"
+            ),
+            "video_id": saved_card.video_id,
+            "video_title": watched_titles.get(saved_card.video_id, "Your saved practice"),
+        })
+
     for video in videos:
         try:
             # Home needs a compact varied queue, not the full video deck. Skip
@@ -151,10 +189,9 @@ async def get_home_queue(
             if not words:
                 continue
         except Exception:
-            # A watched video may still be processing subtitles. It should not
-            # make the whole home queue fail, but it is important to report
-            # that state rather than presenting it as an empty watch history.
-            preparing_video_ids.add(video["video_id"])
+            # Keep the underlying cause honest: there is no backend job that
+            # will turn this into a card merely by refreshing Home.
+            unavailable_video_ids.add(video["video_id"])
             continue
 
         for item in vocabulary_items:
@@ -177,9 +214,8 @@ async def get_home_queue(
             context = await asyncio.to_thread(_load_flashcard_context, video["video_id"], lang)
             card_jobs.extend((word, video["video_id"], video["title"], context) for word in words)
         except Exception:
-            # Keep the immediate vocabulary cards above. Sentence/context
-            # enrichment can safely catch up in a dedicated practice session.
-            preparing_video_ids.add(video["video_id"])
+            # Immediate vocabulary cards above are already usable. Context is
+            # optional enrichment, not a reason to call this source pending.
             continue
 
     semaphore = asyncio.Semaphore(HOME_QUEUE_BUILD_CONCURRENCY)
@@ -219,12 +255,6 @@ async def get_home_queue(
 
     cards.extend(card for card in generated if card is not None)
 
-    # If every card for an otherwise usable source misses the first-load time
-    # budget (or its definition cache), it is still an in-progress source from
-    # the learner's perspective.
-    if card_jobs and not generated:
-        preparing_video_ids.update(video_id for _, video_id, _, _ in card_jobs)
-
     # Match the old UI's last-write-wins deduplication. Keep every uploaded
     # word: the browser owns FSRS priority, so truncating this list here could
     # hide a locally due card before it gets a chance to be selected.
@@ -234,7 +264,8 @@ async def get_home_queue(
         "cards": list(card_by_key.values()),
         "partial": bool(pending),
         "source_video_count": source_video_count,
-        "preparing_video_count": len(preparing_video_ids),
+        "preparing_video_count": 0,
+        "unavailable_video_count": len(unavailable_video_ids),
     }
 
 
