@@ -360,6 +360,18 @@ def _load_session(db: Session, session_id: int) -> m.CV2Session:
     return sess
 
 
+def _load_owned_session(db: Session, session_id: int, current_user: Optional[User]) -> m.CV2Session:
+    """Same as _load_session, but 404s (not 403 — no confirming a session ID
+    exists to someone who doesn't own it) if the session belongs to a
+    different signed-in user. Sessions created before per-user scoping have
+    user_id=None and stay reachable by anyone, matching their pre-existing
+    (unscoped) behavior rather than orphaning them outright."""
+    sess = _load_session(db, session_id)
+    if sess.user_id is not None and (current_user is None or sess.user_id != current_user.id):
+        raise HTTPException(status_code=404, detail="Session not found.")
+    return sess
+
+
 def _turn_dict(row: m.CV2Turn) -> dict:
     meta = json.loads(row.meta_json) if row.meta_json else {}
     return {
@@ -459,9 +471,14 @@ def _next_idx(db: Session, session_id: int) -> int:
 
 
 @router.post("/session/{session_id}/turn")
-def chat_turn(session_id: int, req: TurnRequest, db: Session = Depends(get_db)):
+def chat_turn(
+    session_id: int,
+    req: TurnRequest,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user_optional),
+):
     _ensure_tables()
-    sess = _load_session(db, session_id)
+    sess = _load_owned_session(db, session_id, current_user)
     profile = {"level": sess.level, "reason": sess.reason, "english_support": sess.english_support}
     due_words = [w["lemma"] for w in json.loads(sess.due_words_json or "[]")]
     history = _history(db, session_id)
@@ -496,11 +513,16 @@ def chat_turn(session_id: int, req: TurnRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/session/{session_id}/regenerate")
-def regenerate(session_id: int, req: LangBody, db: Session = Depends(get_db)):
+def regenerate(
+    session_id: int,
+    req: LangBody,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user_optional),
+):
     """Produce a different assistant reply to the most recent learner turn,
     replacing the last assistant message in place."""
     _ensure_tables()
-    sess = _load_session(db, session_id)
+    sess = _load_owned_session(db, session_id, current_user)
     profile = {"level": sess.level, "reason": sess.reason, "english_support": sess.english_support}
     due_words = [w["lemma"] for w in json.loads(sess.due_words_json or "[]")]
 
@@ -533,39 +555,59 @@ def regenerate(session_id: int, req: LangBody, db: Session = Depends(get_db)):
 
 
 @router.post("/session/{session_id}/suggest")
-def suggest(session_id: int, req: LangBody, db: Session = Depends(get_db)):
+def suggest(
+    session_id: int,
+    req: LangBody,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user_optional),
+):
     """Suggest a few things the learner could say next."""
     _ensure_tables()
-    sess = _load_session(db, session_id)
+    sess = _load_owned_session(db, session_id, current_user)
     profile = {"level": sess.level, "reason": sess.reason, "english_support": sess.english_support}
     due_words = [w["lemma"] for w in json.loads(sess.due_words_json or "[]")]
     return svc.generate_suggestions(profile, due_words, _history(db, session_id), req.language)
 
 
 @router.post("/session/{session_id}/coach")
-def coach(session_id: int, req: HowDoISayRequest, db: Session = Depends(get_db)):
+def coach(
+    session_id: int,
+    req: HowDoISayRequest,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user_optional),
+):
     """The learner replied in English — return the corrected target-language
     message + explanation + advanced grammar feedback (for the right panel)."""
     _ensure_tables()
-    sess = _load_session(db, session_id)
+    sess = _load_owned_session(db, session_id, current_user)
     profile = {"level": sess.level, "reason": sess.reason, "english_support": sess.english_support}
     due_words = [w["lemma"] for w in json.loads(sess.due_words_json or "[]")]
     return svc.coach_english(profile, due_words, _history(db, session_id), req.english, req.language)
 
 
 @router.post("/session/{session_id}/hint")
-def hint(session_id: int, language: str = "ko", db: Session = Depends(get_db)):
+def hint(
+    session_id: int,
+    language: str = "ko",
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user_optional),
+):
     _ensure_tables()
-    sess = _load_session(db, session_id)
+    sess = _load_owned_session(db, session_id, current_user)
     profile = {"level": sess.level, "reason": sess.reason, "english_support": sess.english_support}
     due_words = [w["lemma"] for w in json.loads(sess.due_words_json or "[]")]
     return svc.generate_hint(profile, due_words, _history(db, session_id), language)
 
 
 @router.post("/session/{session_id}/how-do-i-say")
-def how_do_i_say(session_id: int, req: HowDoISayRequest, db: Session = Depends(get_db)):
+def how_do_i_say(
+    session_id: int,
+    req: HowDoISayRequest,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user_optional),
+):
     _ensure_tables()
-    sess = _load_session(db, session_id)
+    sess = _load_owned_session(db, session_id, current_user)
     profile = {"level": sess.level, "reason": sess.reason, "english_support": sess.english_support}
     due_words = [w["lemma"] for w in json.loads(sess.due_words_json or "[]")]
     return svc.how_do_i_say(profile, due_words, req.english, req.language)
@@ -586,9 +628,14 @@ def romanize(req: RomanizeRequest):
 # --------------------------------------------------------------------------
 
 @router.post("/session/{session_id}/session-feedback")
-def session_feedback(session_id: int, req: SessionFeedbackRequest, db: Session = Depends(get_db)):
+def session_feedback(
+    session_id: int,
+    req: SessionFeedbackRequest,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user_optional),
+):
     _ensure_tables()
-    sess = _load_session(db, session_id)
+    sess = _load_owned_session(db, session_id, current_user)
     sess.difficulty_nudge = (sess.difficulty_nudge or 0) + (1 if req.kind == "too_easy" else -1)
     db.add(m.CV2Feedback(session_id=session_id, kind=req.kind))
     db.commit()
