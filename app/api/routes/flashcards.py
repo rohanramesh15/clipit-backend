@@ -3,6 +3,7 @@ import re
 from pathlib import Path
 from typing import List, Set
 from fastapi import APIRouter, HTTPException, Body
+from fastapi.responses import StreamingResponse
 from app.services.subtitle_service import load_cached_subtitles, load_cached_subtitles_ukrainian
 from app.api.routes.netflix import load_cached_netflix_subtitles
 from app.services.vocab_service import load_frequency_map
@@ -290,19 +291,8 @@ def find_sentence_for_word_ukrainian(word: str, subtitles: list, skipped_sentenc
     return {'sentence': word, 'translation': 'No translation available', 'timestamp': 0, 'end_timestamp': 5, 'matched_form': word}
 
 
-@router.post("/flashcard-data")
-async def get_flashcard_data(request: dict = Body(...)):
-    """
-    Generate flashcard data for a list of words from a video.
-    Body: { video_id, words: [...], word_source: "essential"|"selected", language: "ko"|"uk" }
-    """
-    video_id = request.get('video_id')
-    words = request.get('words', [])
-    word_source = request.get('word_source', 'essential')
-    language = request.get('language', 'ko')
-
-    if not video_id or not words:
-        raise HTTPException(status_code=400, detail="video_id and words are required")
+def iter_flashcard_data(video_id: str, words: list[str], language: str):
+    """Yield cards one at a time so callers can stream the first usable card."""
 
     # Handle Netflix videos (prefixed with netflix_)
     if video_id.startswith('netflix_'):
@@ -322,7 +312,6 @@ async def get_flashcard_data(request: dict = Body(...)):
 
     deepl_source_lang = {'uk': 'UK', 'ko': 'KO'}.get(language, 'KO')
 
-    flashcards = []
     for word in words:
         skipped = get_skipped_for_word(word)
 
@@ -374,7 +363,7 @@ async def get_flashcard_data(request: dict = Body(...)):
         if (not sentence_translation or sentence_translation == 'No translation available') and sentence_data['sentence']:
             sentence_translation = translate(sentence_data['sentence'], source_lang=deepl_source_lang) or 'No translation available'
 
-        flashcards.append({
+        yield {
             'target_word': word,
             'dictionary_form': dictionary_form,
             'english': definition,
@@ -386,7 +375,21 @@ async def get_flashcard_data(request: dict = Body(...)):
             'video_id': video_id,
             'rank': rank,
             'language': language,
-        })
+        }
+
+
+@router.post("/flashcard-data")
+async def get_flashcard_data(request: dict = Body(...)):
+    """Generate flashcard data for a list of words from a video."""
+    video_id = request.get('video_id')
+    words = request.get('words', [])
+    word_source = request.get('word_source', 'essential')
+    language = request.get('language', 'ko')
+
+    if not video_id or not words:
+        raise HTTPException(status_code=400, detail="video_id and words are required")
+
+    flashcards = list(iter_flashcard_data(video_id, words, language))
 
     return {
         'video_id': video_id,
@@ -394,6 +397,37 @@ async def get_flashcard_data(request: dict = Body(...)):
         'total_cards': len(flashcards),
         'flashcards': flashcards
     }
+
+
+@router.post("/flashcard-data/stream")
+async def stream_flashcard_data(request: dict = Body(...)):
+    """Stream each generated card as a server-sent event.
+
+    This keeps the established bulk endpoint for cache consumers while letting
+    an interactive review session render its first card as soon as it is ready.
+    """
+    video_id = request.get('video_id')
+    words = request.get('words', [])
+    language = request.get('language', 'ko')
+
+    if not video_id or not words:
+        raise HTTPException(status_code=400, detail="video_id and words are required")
+
+    def event_stream():
+        try:
+            for card in iter_flashcard_data(video_id, words, language):
+                yield f"event: card\ndata: {json.dumps(card, ensure_ascii=False)}\n\n"
+            yield "event: complete\ndata: {}\n\n"
+        except HTTPException as error:
+            yield f"event: error\ndata: {json.dumps({'detail': error.detail})}\n\n"
+        except Exception:
+            yield "event: error\ndata: {\"detail\": \"Unable to generate flashcards\"}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post("/flashcard-skip")
