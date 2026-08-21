@@ -1,6 +1,7 @@
 const API = 'https://project-deadbird-backend.fly.dev/api';
 const APP_URL = 'https://www.joinclipit.com';
 const root = document.getElementById('root');
+let lastFocusedElement = null;
 
 // ─── State ────────────────────────────────────────────
 let state = {
@@ -47,7 +48,7 @@ const normalizeLang = (l) => (SUPPORTED_LANGUAGES.includes(l) ? l : 'ko');
 
   // Refresh every 5s so newly tracked videos appear without closing the popup
   setInterval(() => {
-    if (['list', 'empty', 'not-logged-in'].includes(state.view)) fetchVideos();
+    if (['list', 'empty', 'not-logged-in'].includes(state.view) && !root.contains(document.activeElement)) fetchVideos();
   }, 5000);
 })();
 
@@ -95,7 +96,51 @@ function render() {
   else if (view === 'list')         root.innerHTML = tmplList();
   else if (view === 'detail')       root.innerHTML = tmplDetail();
   bindEvents();
+  if (state.deleteConfirm) {
+    requestAnimationFrame(() => {
+      root.querySelector('.dialog-btn-cancel:not(:disabled), .dialog')?.focus();
+    });
+  }
 }
+
+function restoreFocus() {
+  requestAnimationFrame(() => {
+    if (lastFocusedElement?.isConnected) lastFocusedElement.focus();
+    else root.querySelector('button')?.focus();
+    lastFocusedElement = null;
+  });
+}
+
+document.addEventListener('keydown', (event) => {
+  if (!state.deleteConfirm) return;
+  const dialog = root.querySelector('.dialog');
+  if (!dialog) return;
+
+  if (event.key === 'Escape' && !state.isDeleting) {
+    event.preventDefault();
+    state.deleteConfirm = null;
+    render();
+    restoreFocus();
+    return;
+  }
+  if (event.key !== 'Tab') return;
+
+  const focusable = Array.from(dialog.querySelectorAll('button:not(:disabled), [href]'));
+  if (!focusable.length) {
+    event.preventDefault();
+    dialog.focus();
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+});
 
 function bindEvents() {
   root.querySelectorAll('[data-action]').forEach(el => {
@@ -140,12 +185,14 @@ async function handleAction(e) {
   }
   if (action === 'show-delete-confirm') {
     const { id, title } = el.dataset;
+    lastFocusedElement = el;
     state.deleteConfirm = { video_id: id, title };
     render();
   }
   if (action === 'cancel-delete') {
     state.deleteConfirm = null;
     render();
+    restoreFocus();
   }
   if (action === 'delete-video-only') {
     await deleteVideo(false);
@@ -186,6 +233,7 @@ async function deleteVideo(deleteFlashcards = false) {
     state.deleteConfirm = null;
     state.isDeleting = false;
     render();
+    restoreFocus();
   }
 }
 
@@ -253,8 +301,8 @@ function tmplLoading() {
   return `
     ${header({ dot: null, right: '' })}
     <div class="body">
-      <div class="center-state">
-        <div class="spinner"></div>
+      <div class="center-state" role="status" aria-live="polite">
+        <div class="spinner" aria-hidden="true"></div>
         <p class="sub">Connecting...</p>
       </div>
     </div>
@@ -339,7 +387,8 @@ function tmplList() {
           data-action="show-delete-confirm"
           data-id="${v.video_id}"
           data-title="${esc(v.title)}"
-          title="Remove from history">
+          title="Remove from history"
+          aria-label="Remove ${esc(v.title)} from history">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>
           </svg>
@@ -350,22 +399,22 @@ function tmplList() {
 
   const deleteDialog = state.deleteConfirm ? `
     <div class="dialog-overlay" data-action="cancel-delete">
-      <div class="dialog">
+      <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="delete-dialog-title" aria-describedby="delete-dialog-description" tabindex="-1">
         <div class="dialog-header">
           <div class="dialog-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>
             </svg>
           </div>
-          <button class="dialog-close" data-action="cancel-delete" ${state.isDeleting ? 'disabled' : ''}>
+          <button class="dialog-close" data-action="cancel-delete" aria-label="Close remove confirmation" ${state.isDeleting ? 'disabled' : ''}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M18 6L6 18"/><path d="M6 6l12 12"/>
             </svg>
           </button>
         </div>
-        <div class="dialog-title">Remove from History?</div>
+        <div class="dialog-title" id="delete-dialog-title">Remove from History?</div>
         <div class="dialog-video-title">${esc(state.deleteConfirm.title)}</div>
-        <div class="dialog-text">
+        <div class="dialog-text" id="delete-dialog-description">
           Choose whether to also delete flashcards for words found in this video.
         </div>
         <div class="dialog-actions-vertical">
@@ -399,8 +448,8 @@ function tmplDetail() {
 
   if (words === 'loading') {
     body = `
-      <div class="center-state">
-        <div class="spinner"></div>
+      <div class="center-state" role="status" aria-live="polite">
+        <div class="spinner" aria-hidden="true"></div>
         <p class="sub">Fetching subtitles & words...</p>
       </div>
     `;
@@ -464,14 +513,14 @@ function tmplDetail() {
 
 // ─── Helpers ──────────────────────────────────────────
 function header({ dot, right }) {
-  const dotHtml = dot ? `<span class="status-dot ${dot}"></span>` : '';
+  const dotHtml = dot ? `<span class="status-dot ${dot}" aria-hidden="true"></span>` : '';
   const audioBtn = state.isNetflixTab ? (
     state.audioEnabled
-      ? '<span class="audio-badge enabled" title="Audio capture enabled">🎤</span>'
+      ? '<span class="audio-badge enabled" role="img" aria-label="Audio capture enabled">🎤</span>'
       : '<button class="audio-btn" data-action="enable-audio" title="Enable audio capture">Enable Audio</button>'
   ) : '';
   const hideSubsBtn = (state.isNetflixTab || state.isYouTubeTab) ? `
-    <button class="audio-btn ${state.hideSubtitles ? 'active' : ''}" data-action="toggle-hide-subtitles" title="${state.hideSubtitles ? 'Show subtitles' : 'Hide subtitles (still captured)'}">
+    <button class="audio-btn ${state.hideSubtitles ? 'active' : ''}" data-action="toggle-hide-subtitles" aria-pressed="${state.hideSubtitles}" title="${state.hideSubtitles ? 'Show subtitles' : 'Hide subtitles (still captured)'}">
       ${state.hideSubtitles ? 'Show Subtitles' : 'Hide Subtitles'}
     </button>
   ` : '';

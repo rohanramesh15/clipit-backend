@@ -20,7 +20,7 @@
       --accent-rgb: 196, 98, 90;
       --text-primary: #4c2323;
       --text-secondary: #7a3b3b;
-      --text-muted: #a87a7a;
+      --text-muted: #986a6a;
       --border-subtle: #fcf6ed;
       --border-medium: rgba(76, 35, 35, 0.14);
       --overlay-bg: rgba(76, 35, 35, 0.35);
@@ -46,6 +46,19 @@
       flex: 1;
       min-height: 0;
       max-height: 560px;
+    }
+
+    button:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+      }
     }
 
     /* ─── Header ─────────────────────────────── */
