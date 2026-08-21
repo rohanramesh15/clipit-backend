@@ -76,7 +76,12 @@ async def get_home_queue(
     """
     # Imports stay local to keep this router independent from the vocabulary
     # and flashcard routers during application startup.
-    from app.api.routes.flashcards import _build_one_flashcard, _load_flashcard_context
+    from app.api.routes.flashcards import (
+        _build_one_flashcard,
+        _load_flashcard_context,
+        load_definitions,
+        load_user_definitions,
+    )
     from app.api.routes.vocabulary import get_vocabulary
 
     uploaded_words = (
@@ -107,6 +112,12 @@ async def get_home_queue(
     source_video_count = len(videos)
     preparing_video_ids: set[str] = set()
     card_jobs: list[tuple[str, str, str, dict]] = []
+    # The Home list only needs a word and a short meaning. Do not make it wait
+    # for the heavier sentence/context enrichment used by a review session.
+    # Existing definitions are free to read; unavailable definitions receive a
+    # clear fallback while the dedicated practice flow enriches them later.
+    definitions = load_definitions()
+    user_definitions = load_user_definitions()
     for video in videos:
         try:
             # Home needs a compact varied queue, not the full video deck. Skip
@@ -120,15 +131,39 @@ async def get_home_queue(
                 current_user=current_user,
                 upgrade_cards=False,
             )
-            words = [item["word"] for item in vocabulary.get("vocabulary", [])]
+            vocabulary_items = vocabulary.get("vocabulary", [])
+            words = [item["word"] for item in vocabulary_items]
             if not words:
                 continue
-            context = await asyncio.to_thread(_load_flashcard_context, video["video_id"], lang)
-            card_jobs.extend((word, video["video_id"], video["title"], context) for word in words)
         except Exception:
             # A watched video may still be processing subtitles. It should not
             # make the whole home queue fail, but it is important to report
             # that state rather than presenting it as an empty watch history.
+            preparing_video_ids.add(video["video_id"])
+            continue
+
+        for item in vocabulary_items:
+            word = item["word"]
+            definition = (
+                item.get("user_translation")
+                or user_definitions.get(f"{lang}:{word}")
+                or definitions.get(word)
+                or "Translation available when you start practicing"
+            )
+            cards.append({
+                "target_word": word,
+                "dictionary_form": word,
+                "english": definition,
+                "video_id": video["video_id"],
+                "video_title": video["title"],
+            })
+
+        try:
+            context = await asyncio.to_thread(_load_flashcard_context, video["video_id"], lang)
+            card_jobs.extend((word, video["video_id"], video["title"], context) for word in words)
+        except Exception:
+            # Keep the immediate vocabulary cards above. Sentence/context
+            # enrichment can safely catch up in a dedicated practice session.
             preparing_video_ids.add(video["video_id"])
             continue
 
