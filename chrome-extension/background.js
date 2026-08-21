@@ -152,37 +152,6 @@ async function notifyAppVideoTracked(videoId, lang) {
   ));
 }
 
-async function notifyAppCaptionResync(message) {
-  const appTabs = await chrome.tabs.query({ url: CLIPIT_APP_URL_PATTERNS });
-  await Promise.all(appTabs.map((tab) =>
-    chrome.tabs.sendMessage(tab.id, { type: 'CAPTION_RESYNC_PROGRESS', ...message }).catch(() => {}),
-  ));
-}
-
-async function resyncWatchedCaptions(videoIds, lang) {
-  const uniqueVideoIds = [...new Set(videoIds)]
-    .filter((videoId) => typeof videoId === 'string' && videoId && !videoId.startsWith('netflix_'));
-  let recovered = 0;
-  let unavailable = 0;
-
-  await notifyAppCaptionResync({ state: 'started', total: uniqueVideoIds.length });
-  for (let index = 0; index < uniqueVideoIds.length; index += 1) {
-    const videoId = uniqueVideoIds[index];
-    await notifyAppCaptionResync({ state: 'progress', completed: index, total: uniqueVideoIds.length, videoId });
-    const didRecover = await runVocabPipeline(videoId, lang, { force: true, captureOnly: true });
-    if (didRecover) recovered += 1;
-    else unavailable += 1;
-  }
-  await notifyAppCaptionResync({
-    state: 'complete',
-    completed: uniqueVideoIds.length,
-    total: uniqueVideoIds.length,
-    recovered,
-    unavailable,
-  });
-  return { recovered, unavailable, total: uniqueVideoIds.length };
-}
-
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   // Only care about URL changes on YouTube watch pages
   const url = changeInfo.url;
@@ -481,18 +450,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     getCachedVocab(msg.videoId, msg.lang || 'ko').then(sendResponse);
     return true;
   }
-  if (msg.type === 'RESYNC_WATCHED_CAPTIONS') {
-    const videoIds = Array.isArray(msg.videoIds) ? msg.videoIds : [];
-    const lang = SUPPORTED_LANGUAGES.includes(msg.lang) ? msg.lang : 'ko';
-    resyncWatchedCaptions(videoIds, lang)
-      .catch(async (error) => {
-        console.error('[ClipIt] Caption resync failed:', error);
-        await notifyAppCaptionResync({ state: 'failed' });
-      });
-    sendResponse({ success: true, accepted: videoIds.length });
-    return;
-  }
-
   // Netflix tracking
   if (msg.type === 'TRACK_NETFLIX') {
     currentNetflixVideoId = msg.videoId;
@@ -848,7 +805,7 @@ async function trackAndPrefetch(videoId, title, lang = 'ko') {
   }
 }
 
-async function runVocabPipeline(videoId, lang = 'ko', { force = false, captureOnly = false } = {}) {
+async function runVocabPipeline(videoId, lang = 'ko') {
   console.log(`[ClipIt] runVocabPipeline starting: ${videoId} (${lang})`);
   const token = await getAuthToken();
   const cacheKey = `vocab_${lang}_${videoId}`;
@@ -857,9 +814,9 @@ async function runVocabPipeline(videoId, lang = 'ko', { force = false, captureOn
   const existing = await chrome.storage.local.get(cacheKey);
   if (existing[cacheKey] && !existing[cacheKey].loading) {
     const age = Date.now() - (existing[cacheKey].cachedAt || 0);
-    if (!force && age < CACHE_TTL_MS) {
+    if (age < CACHE_TTL_MS) {
       console.log(`[ClipIt] runVocabPipeline: cache still fresh, skipping`);
-      return true; // Fresh cache, skip
+      return; // Fresh cache, skip
     }
   }
 
@@ -884,7 +841,7 @@ async function runVocabPipeline(videoId, lang = 'ko', { force = false, captureOn
         await chrome.storage.local.set({
           [cacheKey]: { loading: false, words: [], total: 0, cachedAt: Date.now() }
         });
-        return false;
+        return;
       }
 
       // Upload captions before marking the video ready. Home relies on the
@@ -915,7 +872,6 @@ async function runVocabPipeline(videoId, lang = 'ko', { force = false, captureOn
       // Do not advertise captions as ready if their durable upload failed.
       await updateStatus(videoId, lang, uploaded);
       if (!uploaded) throw new Error('subtitle upload');
-      if (captureOnly) return true;
     }
 
     // Step 2: vocabulary (all words in freq list, no level filter)
@@ -930,7 +886,7 @@ async function runVocabPipeline(videoId, lang = 'ko', { force = false, captureOn
       await chrome.storage.local.set({
         [cacheKey]: { loading: false, words: [], total: 0, cachedAt: Date.now() }
       });
-      return true;
+      return;
     }
 
     // Step 3: flashcard data (English definitions + example sentences)
@@ -971,13 +927,11 @@ async function runVocabPipeline(videoId, lang = 'ko', { force = false, captureOn
     await chrome.storage.local.set({
       [cacheKey]: { loading: false, words, total: words.length, cachedAt: Date.now() }
     });
-    return true;
   } catch (error) {
     console.error(`[Deadbird] Vocab pipeline error for ${videoId} (${lang}):`, error);
     await chrome.storage.local.set({
       [cacheKey]: { loading: false, error: true, words: null, cachedAt: Date.now() }
     });
-    return false;
   }
 }
 

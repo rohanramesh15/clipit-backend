@@ -106,17 +106,10 @@ async def get_home_queue(
             "video_title": watched_titles.get(saved_card.video_id, "Your saved practice"),
         })
 
-    missing_caption_videos: list[dict] = []
     for video in all_watched_videos:
-        # A false status is a durable record that the extension did not find
-        # this language's captions.  Include it in the resync list without
-        # attempting a server-side YouTube fetch.
+        # Do not attempt a server-side YouTube fetch for a source the
+        # extension has already confirmed lacks this language's captions.
         if video.get(language_status_key) is False:
-            missing_caption_videos.append({
-                "video_id": video["video_id"],
-                "title": video["title"],
-                "platform": "netflix" if video["video_id"].startswith("netflix_") else "youtube",
-            })
             continue
         try:
             vocabulary = await get_vocabulary(
@@ -130,18 +123,8 @@ async def get_home_queue(
             vocabulary_items = vocabulary.get("vocabulary", [])
             words = [item["word"] for item in vocabulary_items]
             if not words:
-                missing_caption_videos.append({
-                    "video_id": video["video_id"],
-                    "title": video["title"],
-                    "platform": "netflix" if video["video_id"].startswith("netflix_") else "youtube",
-                })
                 continue
         except Exception:
-            missing_caption_videos.append({
-                "video_id": video["video_id"],
-                "title": video["title"],
-                "platform": "netflix" if video["video_id"].startswith("netflix_") else "youtube",
-            })
             continue
 
         for item in vocabulary_items:
@@ -168,9 +151,6 @@ async def get_home_queue(
         "cards": list(card_by_key.values()),
         "partial": False,
         "source_video_count": source_video_count,
-        "preparing_video_count": 0,
-        "unavailable_video_count": len(missing_caption_videos),
-        "missing_caption_videos": missing_caption_videos,
     }
 
 

@@ -89,43 +89,10 @@ syncLanguage();
 // This crosses Chrome's extension/page boundary without exposing the user's
 // token, and lets the app refresh its cached Watch History immediately.
 chrome.runtime.onMessage.addListener((message) => {
-  if (message?.type === 'VIDEO_TRACKED') {
-    window.dispatchEvent(new CustomEvent('clipit:video-tracked', {
-      detail: { videoId: message.videoId, lang: message.lang },
-    }));
-    return;
-  }
-  if (message?.type === 'CAPTION_RESYNC_PROGRESS') {
-    window.dispatchEvent(new CustomEvent(`clipit:caption-resync-${message.state}`, {
-      detail: message,
-    }));
-  }
-});
-
-// The Home word inventory can ask the extension to re-fetch historic YouTube
-// captions directly from the user's browser.  The page never receives the
-// extension token; this bridge only forwards the selected video IDs.
-window.addEventListener('clipit:resync-captions', (event) => {
-  const detail = event instanceof CustomEvent ? event.detail : null;
-  const videoIds = Array.isArray(detail?.videoIds) ? detail.videoIds : [];
-  if (!videoIds.length) return;
-  try {
-    chrome.runtime.sendMessage({
-      type: 'RESYNC_WATCHED_CAPTIONS',
-      videoIds,
-      lang: detail?.lang,
-    }).then((response) => {
-      if (!response?.success) {
-        window.dispatchEvent(new CustomEvent('clipit:caption-resync-failed'));
-      }
-    }).catch((error) => {
-      stopSyncingAfterReload(error);
-      window.dispatchEvent(new CustomEvent('clipit:caption-resync-failed'));
-    });
-  } catch (error) {
-    stopSyncingAfterReload(error);
-    window.dispatchEvent(new CustomEvent('clipit:caption-resync-failed'));
-  }
+  if (message?.type !== 'VIDEO_TRACKED') return;
+  window.dispatchEvent(new CustomEvent('clipit:video-tracked', {
+    detail: { videoId: message.videoId, lang: message.lang },
+  }));
 });
 
 // Poll every second to catch same-window login/logout
