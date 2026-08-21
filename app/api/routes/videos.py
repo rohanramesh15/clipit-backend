@@ -101,6 +101,11 @@ async def get_home_queue(
     ]
 
     videos = get_user_filtered_videos(db, current_user.id, lang)[:HOME_QUEUE_VIDEO_LIMIT]
+    # Keep the watched-video count in the response even when none of those
+    # videos can produce a card yet.  The client uses it to distinguish
+    # "nothing watched" from "captions/cards are still being prepared".
+    source_video_count = len(videos)
+    preparing_video_ids: set[str] = set()
     card_jobs: list[tuple[str, str, str, dict]] = []
     for video in videos:
         try:
@@ -122,7 +127,9 @@ async def get_home_queue(
             card_jobs.extend((word, video["video_id"], video["title"], context) for word in words)
         except Exception:
             # A watched video may still be processing subtitles. It should not
-            # make the whole home queue fail.
+            # make the whole home queue fail, but it is important to report
+            # that state rather than presenting it as an empty watch history.
+            preparing_video_ids.add(video["video_id"])
             continue
 
     semaphore = asyncio.Semaphore(HOME_QUEUE_BUILD_CONCURRENCY)
@@ -162,6 +169,12 @@ async def get_home_queue(
 
     cards.extend(card for card in generated if card is not None)
 
+    # If every card for an otherwise usable source misses the first-load time
+    # budget (or its definition cache), it is still an in-progress source from
+    # the learner's perspective.
+    if card_jobs and not generated:
+        preparing_video_ids.update(video_id for _, video_id, _, _ in card_jobs)
+
     # Match the old UI's last-write-wins deduplication. Keep every uploaded
     # word: the browser owns FSRS priority, so truncating this list here could
     # hide a locally due card before it gets a chance to be selected.
@@ -170,6 +183,8 @@ async def get_home_queue(
         "lang": lang,
         "cards": list(card_by_key.values()),
         "partial": bool(pending),
+        "source_video_count": source_video_count,
+        "preparing_video_count": len(preparing_video_ids),
     }
 
 
