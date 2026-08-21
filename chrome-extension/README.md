@@ -23,7 +23,7 @@ A Chrome extension that automatically tracks YouTube and Netflix videos you watc
 
 Before using the extension, you must sign in to your Deadbird account:
 
-1. Open the Deadbird web app: https://clipit-sable.vercel.app
+1. Open the ClipIt web app: https://www.joinclipit.com
 2. Sign in or create an account
 3. Keep the tab open in the background (the extension will automatically sync your authentication)
 
@@ -101,7 +101,7 @@ The extension gracefully handles various error scenarios:
 The extension is configured to work with:
 
 - **Backend API**: https://project-deadbird-backend.fly.dev/api
-- **Frontend App**: https://clipit-sable.vercel.app
+- **Frontend App**: https://www.joinclipit.com
 - **Development**: Also supports localhost URLs for development
 
 ### Permissions

@@ -12,7 +12,7 @@
  * So we poll every second to catch same-window login/logout events.
  *
  * Injected into:
- * - https://clipit-sable.vercel.app/* (production)
+ * - https://www.joinclipit.com/* (production)
  */
 
 // Supabase project ref is pyvyjdzwjgdbainzoiug (clipit-frontend/.env.production);

@@ -28,6 +28,8 @@ class Settings(BaseSettings):
         "http://localhost:8000",
         "http://127.0.0.1:8000",
         "https://project-deadbird-frontend.fly.dev",
+        "https://joinclipit.com",
+        "https://www.joinclipit.com",
         "https://theclipitapp.com",
         "https://www.theclipitapp.com",
         "https://clipit-sable.vercel.app",
@@ -59,7 +61,7 @@ class Settings(BaseSettings):
     # Email (Resend)
     RESEND_API_KEY: str = ""
     EMAIL_FROM: str = "Clip It <noreply@theclipitapp.com>"
-    FRONTEND_URL: str = "https://www.theclipitapp.com"
+    FRONTEND_URL: str = "https://www.joinclipit.com"
 
     # Gemini (chat, embeddings, STT, TTS)
     GEMINI_API_KEY: str = ""

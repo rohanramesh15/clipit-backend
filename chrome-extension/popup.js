@@ -1,5 +1,5 @@
 const API = 'https://project-deadbird-backend.fly.dev/api';
-const APP_URL = 'https://clipit-sable.vercel.app';
+const APP_URL = 'https://www.joinclipit.com';
 const root = document.getElementById('root');
 
 // ─── State ────────────────────────────────────────────

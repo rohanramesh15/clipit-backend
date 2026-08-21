@@ -124,6 +124,8 @@ const pendingVideoTracks = new Map(); // videoId → fallback timeout ID
 const TITLE_FALLBACK_DELAY_MS = 15000;
 const CLIPIT_APP_URL_PATTERNS = [
   'https://clipit-sable.vercel.app/*',
+  'https://joinclipit.com/*',
+  'https://www.joinclipit.com/*',
   'https://theclipitapp.com/*',
   'https://www.theclipitapp.com/*',
   'http://localhost:5173/*',
