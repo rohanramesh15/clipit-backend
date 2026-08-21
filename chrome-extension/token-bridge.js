@@ -85,6 +85,16 @@ function syncLanguage() {
 syncToken();
 syncLanguage();
 
+// Tell the web app as soon as the extension has persisted a tracked video.
+// This crosses Chrome's extension/page boundary without exposing the user's
+// token, and lets the app refresh its cached Watch History immediately.
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type !== 'VIDEO_TRACKED') return;
+  window.dispatchEvent(new CustomEvent('clipit:video-tracked', {
+    detail: { videoId: message.videoId, lang: message.lang },
+  }));
+});
+
 // Poll every second to catch same-window login/logout
 syncInterval = setInterval(() => {
   syncToken();

@@ -264,37 +264,36 @@ function getTitle() {
     const el = document.querySelector(s);
     if (el?.textContent?.trim()) return el.textContent.trim();
   }
-  return document.title.replace(' - YouTube', '').trim() || 'Unknown';
+  const documentTitle = document.title.replace(' - YouTube', '').trim();
+  return documentTitle === 'YouTube' ? 'Unknown' : (documentTitle || 'Unknown');
 }
 
 function sendTrack(videoId) {
   // Reset watch time when switching videos
   resetWatchTimeTracking();
 
-  // Capture the OLD title so we can detect when it changes
-  const oldTitle = getTitle();
-  console.log('[ClipIt] Old title before navigation:', oldTitle);
-
-  // Retry up to 10 times (5s) waiting for title to change/render
+  // YouTube can take several seconds to replace its generic page title and
+  // render the watch-page heading. Only send a title once it is meaningful;
+  // the background worker has its own bounded fallback for exceptional cases.
   let attempts = 0;
+  const MAX_TITLE_ATTEMPTS = 60; // 30 seconds
   const interval = setInterval(() => {
     try {
+      if (getVideoId() !== videoId) {
+        clearInterval(interval);
+        return;
+      }
+
       const title = getTitle();
       attempts++;
-
-      // Check if title has changed from the old one, or if we've waited long enough
-      const titleChanged = title && title !== 'Unknown' && title !== oldTitle;
-      const gaveUp = attempts >= 10;
-
-      if (titleChanged || gaveUp) {
+      if (title !== 'Unknown') {
         clearInterval(interval);
-        const finalTitle = titleChanged ? title : (title !== 'Unknown' ? title : 'Unknown');
-        console.log('[ClipIt] Sending title after', attempts, 'attempts:', finalTitle);
+        console.log('[ClipIt] Sending title after', attempts, 'attempts:', title);
 
         chrome.runtime.sendMessage({
           type: 'TRACK_VIDEO',
           videoId,
-          title: finalTitle,
+          title,
           lang: preferredLanguage,
         }, () => { try { void chrome.runtime.lastError; } catch (_) {} });
 
@@ -303,6 +302,9 @@ function sendTrack(videoId) {
 
         // Fetch and send subtitles client-side (bypasses YouTube IP blocking on cloud servers)
         setTimeout(() => sendSubtitlesToBackground(videoId, preferredLanguage), 2000);
+      } else if (attempts >= MAX_TITLE_ATTEMPTS) {
+        clearInterval(interval);
+        console.warn(`[ClipIt] No usable YouTube title after ${MAX_TITLE_ATTEMPTS} attempts: ${videoId}`);
       }
     } catch (_) {
       // Extension context invalidated (extension reloaded while tab was open) — stop silently

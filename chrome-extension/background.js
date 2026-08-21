@@ -116,8 +116,39 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 
 // ─── YouTube auto-tracking via tab URL change ────────────────────────────────
-// Deduplication: don't re-track the same video within 5 seconds (reduced from 60s to allow reloads)
+// The URL changes before YouTube reliably renders the title. Keep a bounded
+// fallback so a broken/blocked content script cannot prevent tracking, but let
+// the content script's rendered heading be the normal source of truth.
 const recentlyTracked = new Map(); // videoId → timestamp
+const pendingVideoTracks = new Map(); // videoId → fallback timeout ID
+const TITLE_FALLBACK_DELAY_MS = 15000;
+const CLIPIT_APP_URL_PATTERNS = [
+  'https://clipit-sable.vercel.app/*',
+  'https://theclipitapp.com/*',
+  'https://www.theclipitapp.com/*',
+  'http://localhost:5173/*',
+  'http://localhost:5176/*',
+];
+
+async function updateTrackedVideoTitle(videoId, title) {
+  const token = await getAuthToken();
+  const res = await fetch(`${API}/videos/${videoId}/title`, {
+    method: 'PUT',
+    headers: authHeaders(token),
+    body: JSON.stringify({ title }),
+  });
+
+  if (!res.ok) {
+    throw new Error(`title update failed with ${res.status}`);
+  }
+}
+
+async function notifyAppVideoTracked(videoId, lang) {
+  const appTabs = await chrome.tabs.query({ url: CLIPIT_APP_URL_PATTERNS });
+  await Promise.all(appTabs.map((tab) =>
+    chrome.tabs.sendMessage(tab.id, { type: 'VIDEO_TRACKED', videoId, lang }).catch(() => {}),
+  ));
+}
 
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   // Only care about URL changes on YouTube watch pages
@@ -130,17 +161,22 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   } catch { return; }
   if (!videoId) return;
 
-  // Skip if we tracked this video recently (content script may also fire)
-  // Reduced to 5 seconds so reloads work, but still prevents duplicate tracking on SPA navigation
+  // Skip if we tracked this video recently or are already waiting for its
+  // content script. This still allows a reload to be recorded after 5 seconds.
   const lastTime = recentlyTracked.get(videoId);
-  if (lastTime && Date.now() - lastTime < 5000) return;
-  recentlyTracked.set(videoId, Date.now());
+  if ((lastTime && Date.now() - lastTime < 5000) || pendingVideoTracks.has(videoId)) return;
 
-  // Don't use tab.title — it's often stale (shows previous video's title during navigation)
-  // Let the content script provide the real title via TRACK_VIDEO message
-  const title = 'Unknown';
-  console.log(`[ClipIt] YouTube tab navigation: ${videoId} — awaiting title from content script`);
-  await trackAndPrefetch(videoId, title, await getPreferredLanguage());
+  // Don't use tab.title — it is often the previous video's title during SPA
+  // navigation. The content script will send the rendered heading instead.
+  console.log(`[ClipIt] YouTube tab navigation: ${videoId} — waiting for rendered title`);
+  const fallbackTimeout = setTimeout(async () => {
+    if (!pendingVideoTracks.has(videoId)) return;
+    pendingVideoTracks.delete(videoId);
+    recentlyTracked.set(videoId, Date.now());
+    console.warn(`[ClipIt] Timed out waiting for title: ${videoId}; tracking with fallback`);
+    await trackAndPrefetch(videoId, 'Unknown', await getPreferredLanguage());
+  }, TITLE_FALLBACK_DELAY_MS);
+  pendingVideoTracks.set(videoId, fallbackTimeout);
 });
 
 // ─── Offscreen document management ───────────────────────────────────────────
@@ -382,21 +418,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // YouTube tracking (from content script — also checks dedup)
   if (msg.type === 'TRACK_VIDEO') {
     console.log(`[ClipIt] TRACK_VIDEO received: ${msg.videoId} — ${msg.title}`);
+    const pendingFallback = pendingVideoTracks.get(msg.videoId);
+    if (pendingFallback) {
+      clearTimeout(pendingFallback);
+      pendingVideoTracks.delete(msg.videoId);
+    }
+
     const lastTime = recentlyTracked.get(msg.videoId);
-    // Reduced dedup window to 5 seconds (was 60s) to allow page reloads to re-trigger tracking
     if (lastTime && Date.now() - lastTime < 5000) {
-      // Already tracked recently by tabs.onUpdated — just update title if better
+      // A fallback may have already recorded the video. Backfill its title
+      // without creating another watch record.
       console.log(`[ClipIt] Video ${msg.videoId} already tracked recently, skipping`);
       if (msg.title && msg.title !== 'Unknown') {
-        fetch(`${API}/videos/${msg.videoId}/title`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ title: msg.title }),
-        }).catch(() => {});
+        updateTrackedVideoTitle(msg.videoId, msg.title)
+          .catch(error => console.warn(`[ClipIt] Could not backfill title for ${msg.videoId}:`, error));
       }
-      // The first tab-navigation track can run before the content script has the
-      // app-selected language. Still run the requested language pipeline here so
-      // switching to Ukrainian does not get swallowed by the dedupe guard.
       getActiveTrackingLanguage(msg.lang)
         .then(lang => runVocabPipeline(msg.videoId, lang))
         .then(() => sendResponse({ success: true, is_new: false }));
@@ -756,6 +792,7 @@ async function trackAndPrefetch(videoId, title, lang = 'ko') {
 
     const data = await res.json();
     console.log(`[ClipIt] Tracked: ${videoId} — ${title} (new: ${data.is_new})`);
+    void notifyAppVideoTracked(videoId, lang);
 
     // 2. Run vocab pipeline for the app-selected language only.
     runVocabPipeline(videoId, lang);
