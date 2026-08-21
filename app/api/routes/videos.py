@@ -105,11 +105,26 @@ async def get_home_queue(
         for word in uploaded_words
     ]
 
-    videos = get_user_filtered_videos(db, current_user.id, lang)[:HOME_QUEUE_VIDEO_LIMIT]
+    candidate_videos = get_user_filtered_videos(db, current_user.id, lang)
     # Keep the watched-video count in the response even when none of those
     # videos can produce a card yet.  The client uses it to distinguish
     # "nothing watched" from "captions/cards are still being prepared".
-    source_video_count = len(videos)
+    source_video_count = len(candidate_videos)
+
+    # The fast Home path must not let a handful of brand-new, still-processing
+    # watches hide vocabulary that is already available from an older video.
+    # Subtitle availability is recorded by the extension, so favor confirmed
+    # ready sources before applying the intentionally small preview limit.
+    language_status_key = {
+        "ko": "has_korean",
+        "uk": "has_ukrainian",
+        "en": "has_english",
+    }.get(lang, "has_korean")
+    videos = sorted(
+        candidate_videos,
+        key=lambda video: video.get(language_status_key) is True,
+        reverse=True,
+    )[:HOME_QUEUE_VIDEO_LIMIT]
     preparing_video_ids: set[str] = set()
     card_jobs: list[tuple[str, str, str, dict]] = []
     # The Home list only needs a word and a short meaning. Do not make it wait
