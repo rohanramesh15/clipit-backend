@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import traceback
+from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
@@ -30,12 +31,28 @@ from app.core.config import settings
 from app.core.database import Base, SessionLocal, engine, get_db
 from app.api.deps import get_current_user, get_current_user_optional
 from app.models.user import User
+from app.models.user_flashcard_progress import UserFlashcardProgress
 from app.models import converse_v2 as m
 from app.services import converse_v2_service as svc
+from app.services.video_store import get_user_filtered_videos
+from app.services.subtitle_service import (
+    load_cached_subtitles,
+    load_cached_subtitles_ukrainian,
+    load_cached_subtitles_english,
+)
+from app.services.korean_tokenizer import extract_korean_words_from_subtitles
+from app.services.ukrainian_tokenizer import extract_ukrainian_words_from_subtitles
+from app.services.english_tokenizer import extract_english_words_from_subtitles
+from app.services.vocab_service import load_frequency_map, filter_by_priority_mode
+from app.api.routes.netflix import load_cached_netflix_subtitles
+from app.api.routes.user_vocab import get_user_priority_mode, get_user_vocabulary_words
+from app.api.routes.flashcards import iter_flashcard_data
 
 router = APIRouter()
 
 USER_KEY = "prototype"
+MIXED_WORD_LIMIT = 6
+_frequency_maps: dict[str, dict] = {}
 
 # Create the cv2_* tables once, lazily, so a DB hiccup never blocks app import.
 _tables_ready = False
@@ -150,6 +167,144 @@ def _due_words_for(reason: str, limit: int = 6) -> list[dict]:
     return pool[:limit]
 
 
+def _video_vocabulary_words(video_id: str, language: str, user_id: int, db: Session) -> list[str]:
+    """Return the same eligible vocabulary pool shown for one tracked video."""
+    if video_id.startswith("netflix_"):
+        subtitle_data = load_cached_netflix_subtitles(video_id, language)
+    elif language == "uk":
+        subtitle_data = load_cached_subtitles_ukrainian(video_id)
+    elif language == "en":
+        subtitle_data = load_cached_subtitles_english(video_id)
+    else:
+        subtitle_data = load_cached_subtitles(video_id)
+
+    if not subtitle_data or not subtitle_data.get("subtitles"):
+        return []
+
+    if language == "uk":
+        extract_words = extract_ukrainian_words_from_subtitles
+    elif language == "en":
+        extract_words = extract_english_words_from_subtitles
+    else:
+        extract_words = extract_korean_words_from_subtitles
+
+    frequency_map = _frequency_maps.get(language)
+    if frequency_map is None:
+        frequency_map = load_frequency_map(language)
+        _frequency_maps[language] = frequency_map
+    filtered = filter_by_priority_mode(
+        extract_words(subtitle_data["subtitles"]),
+        frequency_map,
+        get_user_vocabulary_words(user_id, db, language),
+        get_user_priority_mode(user_id, db),
+        language,
+    )
+    return [item["word"] for item in filtered]
+
+
+def _mixed_candidates_for_user(db: Session, user: User, language: str, limit: int = MIXED_WORD_LIMIT) -> list[dict]:
+    """Choose up to ``limit`` real words, balanced across the user's videos.
+
+    Due FSRS cards are preferred. If a user has no synced FSRS state yet, the
+    video vocabulary pool supplies new words so Mixed Chat remains usable from
+    the first tracked video onward.
+    """
+    videos = get_user_filtered_videos(db, user.id, language)
+    if not videos:
+        return []
+
+    video_ids = [video["video_id"] for video in videos]
+    candidates_by_video: dict[str, list[dict]] = {video_id: [] for video_id in video_ids}
+    seen_words: set[str] = set()
+
+    def add_candidate(video: dict, word: str) -> None:
+        normalized = word.strip().lower()
+        if not normalized or normalized in seen_words:
+            return
+        seen_words.add(normalized)
+        candidates_by_video[video["video_id"]].append({
+            "word": word.strip(),
+            "video_id": video["video_id"],
+            "video_title": video["title"],
+        })
+
+    videos_by_id = {video["video_id"]: video for video in videos}
+    due_cards = (
+        db.query(UserFlashcardProgress)
+        .filter(
+            UserFlashcardProgress.user_id == user.id,
+            UserFlashcardProgress.language == language,
+            UserFlashcardProgress.video_id.in_(video_ids),
+            UserFlashcardProgress.due <= datetime.utcnow(),
+        )
+        .order_by(UserFlashcardProgress.due.asc())
+        .all()
+    )
+    for card in due_cards:
+        video = videos_by_id.get(card.video_id)
+        if video:
+            add_candidate(video, card.lemma or card.word)
+
+    # Fill every source with genuine vocabulary only after due cards, so a
+    # learner can still start a mixed session before their local FSRS state has
+    # synchronized to the backend.
+    for video in videos:
+        try:
+            for word in _video_vocabulary_words(video["video_id"], language, user.id, db):
+                add_candidate(video, word)
+        except Exception:
+            # One stale subtitle cache must not hide the rest of the user's decks.
+            continue
+
+    selected: list[dict] = []
+    while len(selected) < limit:
+        added_this_round = False
+        for video_id in video_ids:
+            if not candidates_by_video[video_id]:
+                continue
+            selected.append(candidates_by_video[video_id].pop(0))
+            added_this_round = True
+            if len(selected) == limit:
+                break
+        if not added_this_round:
+            break
+    return selected
+
+
+def _mixed_source_videos(candidates: list[dict]) -> list[dict]:
+    """Return each selected source once, in the same order as the session mix."""
+    sources: list[dict] = []
+    source_ids: set[str] = set()
+    for candidate in candidates:
+        if candidate["video_id"] in source_ids:
+            continue
+        source_ids.add(candidate["video_id"])
+        sources.append({"video_id": candidate["video_id"], "title": candidate["video_title"]})
+    return sources
+
+
+def _materialize_mixed_words(candidates: list[dict], language: str) -> list[dict]:
+    """Attach a definition and dictionary form while retaining source metadata."""
+    due_words: list[dict] = []
+    seen_lemmas: set[str] = set()
+    for candidate in candidates:
+        try:
+            card = next(iter_flashcard_data(candidate["video_id"], [candidate["word"]], language))
+        except Exception:
+            continue
+        lemma = (card.get("dictionary_form") or candidate["word"]).strip()
+        if not lemma or lemma.lower() in seen_lemmas:
+            continue
+        seen_lemmas.add(lemma.lower())
+        due_words.append({
+            "lemma": lemma,
+            "gloss": card.get("english") or "Definition unavailable",
+            "source_video_id": candidate["video_id"],
+            "source_video_title": candidate["video_title"],
+        })
+    return due_words
+
+
 # --------------------------------------------------------------------------
 # Profile helpers
 # --------------------------------------------------------------------------
@@ -257,6 +412,21 @@ def list_videos():
     return {"videos": _MOCK_VIDEOS}
 
 
+@router.get("/mixed-sources")
+def get_mixed_sources(
+    language: str = Query("ko"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Preview the exact tracked videos that can seed the next mixed chat."""
+    candidates = _mixed_candidates_for_user(db, current_user, language)
+    return {
+        "word_count": len(candidates),
+        "max_words": MIXED_WORD_LIMIT,
+        "videos": _mixed_source_videos(candidates),
+    }
+
+
 # --------------------------------------------------------------------------
 # Routes: session + chat
 # --------------------------------------------------------------------------
@@ -280,11 +450,26 @@ def create_session(
         "english_support": "some",
     }
     due_words = _due_words_for(profile["reason"])
+    source_videos: list[dict] = []
 
     seed = {"type": req.seed_type}
     seed_label = None
     seed_video_id = None
-    if req.seed_type == "video":
+    if req.seed_type == "due_words":
+        if not current_user:
+            raise HTTPException(status_code=401, detail="Authentication is required for a mixed chat")
+        candidates = _mixed_candidates_for_user(db, current_user, req.language)
+        due_words = _materialize_mixed_words(candidates, req.language)
+        if not due_words:
+            raise HTTPException(
+                status_code=422,
+                detail="No usable words found in your tracked videos yet. Watch a captioned video, then try again.",
+            )
+        source_ids = {word["source_video_id"] for word in due_words}
+        source_videos = _mixed_source_videos(
+            [candidate for candidate in candidates if candidate["video_id"] in source_ids]
+        )
+    elif req.seed_type == "video":
         # The frontend now sends the real words extracted from the chosen video.
         # Use those as the session's target words (woven into the chat + tracked),
         # and the video title as the seed label. Fall back to the mock gallery
@@ -345,6 +530,7 @@ def create_session(
         "session_id": sess.id,
         "level": profile["level"],
         "due_words": due_words,
+        "source_videos": source_videos,
         "opening": {
             "turn_id": turn.id,
             "reply": opening["reply"],
