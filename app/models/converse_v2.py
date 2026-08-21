@@ -31,6 +31,11 @@ class CV2Session(Base):
 
     id = Column(Integer, primary_key=True)
     user_key = Column(String, index=True)
+    # Real per-user scoping, added alongside user_key rather than replacing it:
+    # every session up to this point was written under the single shared
+    # "prototype" user_key, so those rows have no real owner and are simply
+    # not resumable — nullable here so old rows don't need a backfill.
+    user_id = Column(Integer, index=True, nullable=True)
     seed_type = Column(String, default="due_words")     # due_words | video | free
     seed_label = Column(String, nullable=True)
     seed_video_id = Column(String, nullable=True)

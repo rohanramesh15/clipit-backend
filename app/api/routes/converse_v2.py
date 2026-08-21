@@ -28,6 +28,8 @@ from google.genai import types as gtypes
 
 from app.core.config import settings
 from app.core.database import Base, SessionLocal, engine, get_db
+from app.api.deps import get_current_user, get_current_user_optional
+from app.models.user import User
 from app.models import converse_v2 as m
 from app.services import converse_v2_service as svc
 
@@ -53,6 +55,14 @@ def _ensure_tables() -> None:
                 m.CV2Feedback.__table__,
             ],
         )
+        # create_all only creates missing tables — it never alters an existing
+        # one. cv2_session predates user_id, so patch it in for any DB where
+        # the table was already created before this column existed.
+        from sqlalchemy import text
+
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE cv2_session ADD COLUMN IF NOT EXISTS user_id INTEGER"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_cv2_session_user_id ON cv2_session (user_id)"))
     finally:
         _tables_ready = True
 
@@ -252,7 +262,11 @@ def list_videos():
 # --------------------------------------------------------------------------
 
 @router.post("/session")
-def create_session(req: SessionRequest, db: Session = Depends(get_db)):
+def create_session(
+    req: SessionRequest,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user_optional),
+):
     try:
         _ensure_tables()
     except Exception as e:
@@ -300,6 +314,7 @@ def create_session(req: SessionRequest, db: Session = Depends(get_db)):
 
     sess = m.CV2Session(
         user_key=USER_KEY,
+        user_id=current_user.id if current_user else None,
         seed_type=req.seed_type,
         seed_label=seed_label,
         seed_video_id=seed_video_id,
@@ -343,6 +358,89 @@ def _load_session(db: Session, session_id: int) -> m.CV2Session:
     if not sess:
         raise HTTPException(status_code=404, detail="Session not found.")
     return sess
+
+
+def _turn_dict(row: m.CV2Turn) -> dict:
+    meta = json.loads(row.meta_json) if row.meta_json else {}
+    return {
+        "turn_id": row.id,
+        "role": row.role,
+        "text": row.text,
+        "reply_translation": meta.get("reply_translation"),
+        "correction": meta.get("correction"),
+        "used_target_words": meta.get("used_target_words", []),
+        "suggested_replies": meta.get("suggested_replies", []),
+    }
+
+
+@router.get("/sessions/recent")
+def recent_session(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Most recent session belonging to the signed-in user, for a Resume card.
+
+    Only sessions created after user scoping was added (see CV2Session.user_id)
+    are resumable — sessions from before that point have no owner on record.
+    """
+    _ensure_tables()
+    sess = (
+        db.query(m.CV2Session)
+        .filter(m.CV2Session.user_id == current_user.id)
+        .order_by(m.CV2Session.started_at.desc())
+        .first()
+    )
+    if not sess:
+        return {"session": None}
+
+    turn_count = db.query(m.CV2Turn).filter(m.CV2Turn.session_id == sess.id).count()
+    last_turn = (
+        db.query(m.CV2Turn)
+        .filter(m.CV2Turn.session_id == sess.id)
+        .order_by(m.CV2Turn.idx.desc())
+        .first()
+    )
+    return {
+        "session": {
+            "session_id": sess.id,
+            "seed_type": sess.seed_type,
+            "seed_label": sess.seed_label,
+            "seed_video_id": sess.seed_video_id,
+            "started_at": sess.started_at.isoformat(),
+            "turn_count": turn_count,
+            "last_line": last_turn.text if last_turn else "",
+        }
+    }
+
+
+@router.get("/session/{session_id}/resume")
+def resume_session(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Full turn history for a session, so the frontend can rehydrate the chat
+    exactly where it left off. 404s (not 403) on someone else's session, same
+    as a session that doesn't exist, so this can't be used to probe IDs."""
+    _ensure_tables()
+    sess = _load_session(db, session_id)
+    if sess.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Session not found.")
+
+    rows = (
+        db.query(m.CV2Turn)
+        .filter(m.CV2Turn.session_id == session_id)
+        .order_by(m.CV2Turn.idx.asc())
+        .all()
+    )
+    return {
+        "session_id": sess.id,
+        "level": sess.level,
+        "seed_label": sess.seed_label,
+        "seed_video_id": sess.seed_video_id,
+        "due_words": json.loads(sess.due_words_json or "[]"),
+        "turns": [_turn_dict(r) for r in rows],
+    }
 
 
 def _history(db: Session, session_id: int) -> list[dict]:
