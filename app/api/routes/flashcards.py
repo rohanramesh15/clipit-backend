@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 from pathlib import Path
@@ -291,9 +292,11 @@ def find_sentence_for_word_ukrainian(word: str, subtitles: list, skipped_sentenc
     return {'sentence': word, 'translation': 'No translation available', 'timestamp': 0, 'end_timestamp': 5, 'matched_form': word}
 
 
-def iter_flashcard_data(video_id: str, words: list[str], language: str):
-    """Yield cards one at a time so callers can stream the first usable card."""
-
+def _load_flashcard_context(video_id: str, language: str) -> dict:
+    """Read-only lookups shared across every word in a video: subtitles,
+    frequency ranks, and definition dictionaries. Loaded once per request
+    and reused for every word, whether processed sequentially or concurrently.
+    """
     # Handle Netflix videos (prefixed with netflix_)
     if video_id.startswith('netflix_'):
         subtitle_data = load_cached_netflix_subtitles(video_id, language)
@@ -305,82 +308,112 @@ def iter_flashcard_data(video_id: str, words: list[str], language: str):
     if not subtitle_data:
         raise HTTPException(status_code=404, detail=f"Subtitles not found for {video_id}")
 
-    subtitles = subtitle_data['subtitles']
-    frequency_map = get_frequency_map(language)
-    definitions = load_definitions()
-    user_definitions = load_user_definitions()
+    return {
+        'subtitles': subtitle_data['subtitles'],
+        'frequency_map': get_frequency_map(language),
+        'definitions': load_definitions(),
+        'user_definitions': load_user_definitions(),
+        'deepl_source_lang': {'uk': 'UK', 'ko': 'KO'}.get(language, 'KO'),
+    }
 
-    deepl_source_lang = {'uk': 'UK', 'ko': 'KO'}.get(language, 'KO')
 
-    for word in words:
-        skipped = get_skipped_for_word(word)
+def _build_one_flashcard(word: str, video_id: str, language: str, ctx: dict) -> dict:
+    """Build a single flashcard, including any DeepL calls needed for a cache
+    miss. Only reads from `ctx` (no shared mutable state), so this is safe to
+    run concurrently across words from a thread pool.
+    """
+    subtitles = ctx['subtitles']
+    frequency_map = ctx['frequency_map']
+    definitions = ctx['definitions']
+    user_definitions = ctx['user_definitions']
+    deepl_source_lang = ctx['deepl_source_lang']
 
-        if language == 'uk':
-            sentence_data = find_sentence_for_word_ukrainian(word, subtitles, skipped)
-            # Include the lemma so the rank + dictionary form resolve against the
-            # lemma-based Ukrainian frequency list.
-            uk_lemma = ukrainian_lemmatizer.lemmatize_word(word)
-            possible_forms = [word, uk_lemma] if uk_lemma != word else [word]
-        else:
-            sentence_data = find_sentence_for_word(word, subtitles, skipped)
-            possible_forms = strip_korean_particles(word)
+    skipped = get_skipped_for_word(word)
 
-        dictionary_form = word
-        rank = frequency_map.get(word)
+    if language == 'uk':
+        sentence_data = find_sentence_for_word_ukrainian(word, subtitles, skipped)
+        # Include the lemma so the rank + dictionary form resolve against the
+        # lemma-based Ukrainian frequency list.
+        uk_lemma = ukrainian_lemmatizer.lemmatize_word(word)
+        possible_forms = [word, uk_lemma] if uk_lemma != word else [word]
+    else:
+        sentence_data = find_sentence_for_word(word, subtitles, skipped)
+        possible_forms = strip_korean_particles(word)
 
-        if not rank:
-            for form in possible_forms:
-                rank = frequency_map.get(form)
-                if rank:
-                    dictionary_form = form
-                    break
+    dictionary_form = word
+    rank = frequency_map.get(word)
 
-        if not rank:
-            dictionary_form = possible_forms[-1] if possible_forms else word
-            rank = 10001
+    if not rank:
+        for form in possible_forms:
+            rank = frequency_map.get(form)
+            if rank:
+                dictionary_form = form
+                break
 
-        # User definitions first, then definitions.json, then context-aware DeepL as fallback
-        user_key = f"{language}:{dictionary_form}"
-        user_key_alt = f"{language}:{word}"
+    if not rank:
+        dictionary_form = possible_forms[-1] if possible_forms else word
+        rank = 10001
+
+    # User definitions first, then definitions.json, then context-aware DeepL as fallback
+    user_key = f"{language}:{dictionary_form}"
+    user_key_alt = f"{language}:{word}"
+    definition = (
+        user_definitions.get(user_key)
+        or user_definitions.get(user_key_alt)
+        or definitions.get(dictionary_form)
+        or definitions.get(word)
+    )
+    if not definition:
+        # Use context-aware translation for better accuracy with polysemous words
+        context = sentence_data.get('sentence', '')
         definition = (
-            user_definitions.get(user_key)
-            or user_definitions.get(user_key_alt)
-            or definitions.get(dictionary_form)
-            or definitions.get(word)
+            translate_word_in_context(dictionary_form, context, source_lang=deepl_source_lang)
+            or translate_word_in_context(word, context, source_lang=deepl_source_lang)
+            or translate(dictionary_form, source_lang=deepl_source_lang)
+            or translate(word, source_lang=deepl_source_lang)
+            or "definition not available"
         )
-        if not definition:
-            # Use context-aware translation for better accuracy with polysemous words
-            context = sentence_data.get('sentence', '')
-            definition = (
-                translate_word_in_context(dictionary_form, context, source_lang=deepl_source_lang)
-                or translate_word_in_context(word, context, source_lang=deepl_source_lang)
-                or translate(dictionary_form, source_lang=deepl_source_lang)
-                or translate(word, source_lang=deepl_source_lang)
-                or "definition not available"
-            )
 
-        sentence_translation = sentence_data['translation']
-        if (not sentence_translation or sentence_translation == 'No translation available') and sentence_data['sentence']:
-            sentence_translation = translate(sentence_data['sentence'], source_lang=deepl_source_lang) or 'No translation available'
+    sentence_translation = sentence_data['translation']
+    if (not sentence_translation or sentence_translation == 'No translation available') and sentence_data['sentence']:
+        sentence_translation = translate(sentence_data['sentence'], source_lang=deepl_source_lang) or 'No translation available'
 
-        yield {
-            'target_word': word,
-            'dictionary_form': dictionary_form,
-            'english': definition,
-            'definition_hash': get_definition_hash(definition),
-            'sentence': sentence_data['sentence'],
-            'sentence_translation': sentence_translation,
-            'timestamp': sentence_data['timestamp'],
-            'end_timestamp': sentence_data['end_timestamp'],
-            'video_id': video_id,
-            'rank': rank,
-            'language': language,
-        }
+    return {
+        'target_word': word,
+        'dictionary_form': dictionary_form,
+        'english': definition,
+        'definition_hash': get_definition_hash(definition),
+        'sentence': sentence_data['sentence'],
+        'sentence_translation': sentence_translation,
+        'timestamp': sentence_data['timestamp'],
+        'end_timestamp': sentence_data['end_timestamp'],
+        'video_id': video_id,
+        'rank': rank,
+        'language': language,
+    }
+
+
+def iter_flashcard_data(video_id: str, words: list[str], language: str):
+    """Yield cards one at a time so callers can stream the first usable card."""
+    ctx = _load_flashcard_context(video_id, language)
+    for word in words:
+        yield _build_one_flashcard(word, video_id, language, ctx)
+
+
+# Bounds how many words' DeepL calls run at once — enough to turn a slow
+# sequential loop into ~1 round-trip, without bursting past DeepL's rate limit.
+_FLASHCARD_CONCURRENCY = 8
 
 
 @router.post("/flashcard-data")
 async def get_flashcard_data(request: dict = Body(...)):
-    """Generate flashcard data for a list of words from a video."""
+    """Generate flashcard data for a list of words from a video.
+
+    Cache-miss words each need one or two DeepL calls; those run concurrently
+    (bounded) via a thread pool instead of one at a time on the event loop,
+    so this endpoint neither blocks other requests nor pays the full
+    sequential cost of every word's translation.
+    """
     video_id = request.get('video_id')
     words = request.get('words', [])
     word_source = request.get('word_source', 'essential')
@@ -389,7 +422,15 @@ async def get_flashcard_data(request: dict = Body(...)):
     if not video_id or not words:
         raise HTTPException(status_code=400, detail="video_id and words are required")
 
-    flashcards = list(iter_flashcard_data(video_id, words, language))
+    ctx = _load_flashcard_context(video_id, language)
+
+    semaphore = asyncio.Semaphore(_FLASHCARD_CONCURRENCY)
+
+    async def build(word: str) -> dict:
+        async with semaphore:
+            return await asyncio.to_thread(_build_one_flashcard, word, video_id, language, ctx)
+
+    flashcards = await asyncio.gather(*(build(word) for word in words))
 
     return {
         'video_id': video_id,
