@@ -377,6 +377,10 @@ class SessionFeedbackRequest(BaseModel):
     kind: str                              # too_easy | too_hard
 
 
+class TargetWordsRequest(BaseModel):
+    words: list[SeedWord]
+
+
 class CorrectionFeedbackRequest(BaseModel):
     turn_id: int | None = None
     verdict: str                           # fine | wrong
@@ -826,6 +830,24 @@ def session_feedback(
     db.add(m.CV2Feedback(session_id=session_id, kind=req.kind))
     db.commit()
     return {"ok": True, "difficulty_nudge": sess.difficulty_nudge}
+
+
+@router.post("/session/{session_id}/target-words")
+def set_target_words(
+    session_id: int,
+    req: TargetWordsRequest,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user_optional),
+):
+    """Attach the resolved target words to a session after it's already
+    started. The video-seed opening line only needs the video's title, so
+    the frontend shows the greeting immediately and fills these in once the
+    slower, translation-heavy word lookup finishes in the background."""
+    _ensure_tables()
+    sess = _load_owned_session(db, session_id, current_user)
+    sess.due_words_json = json.dumps([{"lemma": w.lemma, "gloss": w.gloss} for w in req.words])
+    db.commit()
+    return {"ok": True}
 
 
 @router.post("/correction-feedback")
