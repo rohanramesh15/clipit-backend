@@ -1,5 +1,4 @@
 import time
-import asyncio
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -7,8 +6,6 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.api.deps import get_current_user
 from app.models.user import User
-from app.models.user_vocabulary_list import UserVocabularyList
-from app.models.user_vocabulary_word import UserVocabularyWord
 from app.models.user_flashcard_progress import UserFlashcardProgress
 from app.services.video_store import (
     add_video, get_all_videos, get_filtered_videos,
@@ -54,101 +51,36 @@ class WatchTimeUpdate(BaseModel):
     seconds: int
 
 
-# Home is a preview queue, not a full review deck.  Keep its cold-path work
-# small enough to remain responsive even when definitions need DeepL.
-HOME_QUEUE_VIDEO_LIMIT = 4
-HOME_QUEUE_WORDS_PER_VIDEO = 4
-HOME_QUEUE_BUILD_CONCURRENCY = 4
-HOME_QUEUE_BUILD_TIMEOUT_SECONDS = 7
-
-
 @router.get("/home/queue")
 async def get_home_queue(
     lang: str = "ko",
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Build the practice queue in one authenticated request.
+    """Return the complete durable word inventory from watched captions.
 
-    The old Home flow first fetched history, then made up to three additional
-    browser requests per video. Keeping the candidate selection and card
-    assembly together avoids that request fan-out while preserving the
-    client-side FSRS ordering and local deleted-card state.
+    This is intentionally separate from a practice deck: it does no
+    translation, context, or flashcard-generation work.  That keeps the Home
+    page fast while ensuring the learner can see every captured word instead
+    of a small, opaque preview chosen from a few recent videos.
     """
-    # Imports stay local to keep this router independent from the vocabulary
-    # and flashcard routers during application startup.
-    from app.api.routes.flashcards import (
-        _build_one_flashcard,
-        _load_flashcard_context,
-        load_definitions,
-        load_user_definitions,
-    )
     from app.api.routes.vocabulary import get_vocabulary
 
-    uploaded_words = (
-        db.query(UserVocabularyWord)
-        .join(UserVocabularyList)
-        .filter(
-            UserVocabularyList.user_id == current_user.id,
-            UserVocabularyList.language == lang,
-        )
-        .order_by(UserVocabularyList.created_at, UserVocabularyWord.sort_order)
-        .all()
-    )
-    cards = [
-        {
-            "target_word": word.word,
-            "dictionary_form": word.word,
-            "english": word.translation,
-            "video_id": None,
-            "video_title": "Your vocabulary list",
-        }
-        for word in uploaded_words
-    ]
-
-    # A Home queue must be based on durable user data. Caption-status flags
-    # are only hints from the extension; a flag alone does not prove that the
-    # subtitle payload made it to persistent storage.
     all_watched_videos = get_user_videos(db, current_user.id)
     source_video_count = len(all_watched_videos)
-
-    # The fast Home path must not let a handful of brand-new, still-processing
-    # watches hide vocabulary that is already available from an older video.
-    # Subtitle availability is recorded by the extension, so favor confirmed
-    # ready sources before applying the intentionally small preview limit.
     language_status_key = {
         "ko": "has_korean",
         "uk": "has_ukrainian",
         "en": "has_english",
     }.get(lang, "has_korean")
-    candidate_videos = [
-        video for video in all_watched_videos
-        if video.get(language_status_key) is not False
-    ]
-    videos = sorted(
-        candidate_videos,
-        key=lambda video: video.get(language_status_key) is True,
-        reverse=True,
-    )[:HOME_QUEUE_VIDEO_LIMIT]
-    # There is no server-side preparation job. Track sources that cannot be
-    # read durably instead of falsely telling the learner to wait for work
-    # that will never occur without the extension re-uploading captions.
-    unavailable_video_ids = {
-        video["video_id"] for video in all_watched_videos
-        if video.get(language_status_key) is False
-    }
-    card_jobs: list[tuple[str, str, str, dict]] = []
-    # The Home list only needs a word and a short meaning. Do not make it wait
-    # for the heavier sentence/context enrichment used by a review session.
-    # Existing definitions are free to read; unavailable definitions receive a
-    # clear fallback while the dedicated practice flow enriches them later.
-    definitions = load_definitions()
-    user_definitions = load_user_definitions()
     watched_titles = {video["video_id"]: video["title"] for video in all_watched_videos}
 
-    # Previously reviewed cards are already durable, usable practice content.
-    # Do not hide them just because the source video's subtitle cache is no
-    # longer available (for example, after a Fly machine restart).
+    # Reuse locally cached definitions when available.  The Home inventory
+    # never waits for a remote translation or flashcard-generation request.
+    from app.api.routes.flashcards import load_definitions, load_user_definitions
+    definitions = load_definitions()
+    user_definitions = load_user_definitions()
+
     saved_cards = (
         db.query(UserFlashcardProgress)
         .filter(
@@ -157,7 +89,10 @@ async def get_home_queue(
         )
         .all()
     )
+    cards: list[dict] = []
     for saved_card in saved_cards:
+        if saved_card.video_id not in watched_titles:
+            continue
         word = saved_card.lemma or saved_card.word
         cards.append({
             "target_word": word,
@@ -165,107 +100,77 @@ async def get_home_queue(
             "english": (
                 user_definitions.get(f"{lang}:{word}")
                 or definitions.get(word)
-                or "Translation available when you start practicing"
+                or "Definition available in practice"
             ),
             "video_id": saved_card.video_id,
             "video_title": watched_titles.get(saved_card.video_id, "Your saved practice"),
         })
 
-    for video in videos:
+    missing_caption_videos: list[dict] = []
+    for video in all_watched_videos:
+        # A false status is a durable record that the extension did not find
+        # this language's captions.  Include it in the resync list without
+        # attempting a server-side YouTube fetch.
+        if video.get(language_status_key) is False:
+            missing_caption_videos.append({
+                "video_id": video["video_id"],
+                "title": video["title"],
+                "platform": "netflix" if video["video_id"].startswith("netflix_") else "youtube",
+            })
+            continue
         try:
-            # Home needs a compact varied queue, not the full video deck. Skip
-            # the deck-upgrade write work here; review sessions still perform
-            # it through their existing vocabulary endpoint.
             vocabulary = await get_vocabulary(
                 video_id=video["video_id"],
-                limit=HOME_QUEUE_WORDS_PER_VIDEO,
                 lang=lang,
                 db=db,
                 current_user=current_user,
                 upgrade_cards=False,
+                include_all=True,
             )
             vocabulary_items = vocabulary.get("vocabulary", [])
             words = [item["word"] for item in vocabulary_items]
             if not words:
+                missing_caption_videos.append({
+                    "video_id": video["video_id"],
+                    "title": video["title"],
+                    "platform": "netflix" if video["video_id"].startswith("netflix_") else "youtube",
+                })
                 continue
         except Exception:
-            # Keep the underlying cause honest: there is no backend job that
-            # will turn this into a card merely by refreshing Home.
-            unavailable_video_ids.add(video["video_id"])
+            missing_caption_videos.append({
+                "video_id": video["video_id"],
+                "title": video["title"],
+                "platform": "netflix" if video["video_id"].startswith("netflix_") else "youtube",
+            })
             continue
 
         for item in vocabulary_items:
             word = item["word"]
-            definition = (
-                item.get("user_translation")
-                or user_definitions.get(f"{lang}:{word}")
-                or definitions.get(word)
-                or "Translation available when you start practicing"
-            )
             cards.append({
                 "target_word": word,
                 "dictionary_form": word,
-                "english": definition,
+                "english": (
+                    user_definitions.get(f"{lang}:{word}")
+                    or definitions.get(word)
+                    or "Definition available in practice"
+                ),
                 "video_id": video["video_id"],
                 "video_title": video["title"],
             })
 
-        try:
-            context = await asyncio.to_thread(_load_flashcard_context, video["video_id"], lang)
-            card_jobs.extend((word, video["video_id"], video["title"], context) for word in words)
-        except Exception:
-            # Immediate vocabulary cards above are already usable. Context is
-            # optional enrichment, not a reason to call this source pending.
-            continue
-
-    semaphore = asyncio.Semaphore(HOME_QUEUE_BUILD_CONCURRENCY)
-
-    async def build_card(job: tuple[str, str, str, dict]) -> dict | None:
-        word, video_id, video_title, context = job
-        async with semaphore:
-            try:
-                card = await asyncio.to_thread(_build_one_flashcard, word, video_id, lang, context)
-                card["video_title"] = video_title
-                return card
-            except Exception:
-                # One uncached translation or malformed subtitle should not
-                # blank the complete Home queue.
-                return None
-
-    # Never hold the first signed-in screen hostage to cold translation cache
-    # misses.  Return every card that is ready within the budget; the complete
-    # per-video decks are still generated by the dedicated practice flows.
-    generated = []
-    pending: set[asyncio.Task] = set()
-    if card_jobs:
-        tasks = [asyncio.create_task(build_card(job)) for job in card_jobs]
-        done, pending = await asyncio.wait(tasks, timeout=HOME_QUEUE_BUILD_TIMEOUT_SECONDS)
-        for task in done:
-            try:
-                card = task.result()
-            except Exception:
-                card = None
-            if card is not None:
-                generated.append(card)
-
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
-
-    cards.extend(card for card in generated if card is not None)
-
-    # Match the old UI's last-write-wins deduplication. Keep every uploaded
-    # word: the browser owns FSRS priority, so truncating this list here could
-    # hide a locally due card before it gets a chance to be selected.
-    card_by_key = {card["dictionary_form"] or card["target_word"]: card for card in cards}
+    # A word inventory is distinct by word, preserving the most recently
+    # watched source video.  It is deliberately not capped.
+    card_by_key: dict[str, dict] = {}
+    for card in cards:
+        card_by_key.setdefault(card["dictionary_form"] or card["target_word"], card)
     return {
         "lang": lang,
         "cards": list(card_by_key.values()),
-        "partial": bool(pending),
+        "partial": False,
         "source_video_count": source_video_count,
         "preparing_video_count": 0,
-        "unavailable_video_count": len(unavailable_video_ids),
+        "unavailable_video_count": len(missing_caption_videos),
+        "missing_caption_videos": missing_caption_videos,
     }
 
 

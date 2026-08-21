@@ -45,6 +45,7 @@ async def get_vocabulary(
     video_id: str,
     limit: int = 20,
     lang: str = Query('ko'),
+    include_all: bool = Query(False, description="Return every distinct target-language caption word without priority filtering"),
     apply_limits: bool = Query(False, description="Apply mining limits (cap cards per duration, enforce gaps)"),
     duration_seconds: Optional[float] = Query(None, description="Video duration in seconds (required when apply_limits=True)"),
     upgrade_cards: bool = True,
@@ -102,39 +103,49 @@ async def get_vocabulary(
         }
 
     words = extract_fn(subtitle_data["subtitles"])
-    frequency_map = get_frequency_map(lang)
-
-    # If user is authenticated, apply priority mode (works for all supported languages)
-    priority_mode = None
-    if current_user:
-        priority_mode = get_user_priority_mode(current_user.id, db)
-        user_vocab = get_user_vocabulary_words(current_user.id, db, lang)
-        filtered = filter_by_priority_mode(words, frequency_map, user_vocab, priority_mode, lang)
-    else:
-        filtered = filter_vocabulary(words, frequency_map, language=lang)
-
-    # Apply mining limits if requested
     mining_info = None
-    if apply_limits and duration_seconds is not None:
-        mining_result = apply_mining_limits(
-            vocabulary=filtered,
-            subtitles=subtitle_data["subtitles"],
-            duration_seconds=duration_seconds,
-            user_id=current_user.id if current_user else None,
-            video_id=video_id,
-            language=lang,
-            db=db if current_user else None
-        )
-        limited = mining_result['vocabulary']
-        mining_info = {
-            'session_cap': mining_result['session_cap'],
-            'excluded_previously_mined': mining_result['excluded_previously_mined'],
-            'high_frequency_count': mining_result['high_frequency_count'],
-            'duration_minutes': mining_result['duration_minutes'],
-            'applied_limits': True
-        }
+
+    # The Home word inventory deliberately exposes every distinct word captured
+    # from a video.  Practice/deck flows retain the learner's priority-mode
+    # filtering so they remain focused and manageable.
+    if include_all:
+        limited = [
+            {'word': word, 'rank': None, 'language': lang, 'source': 'caption'}
+            for word in words
+        ]
+        priority_mode = 'all_caption_words'
+    # If user is authenticated, apply priority mode (works for all supported languages)
     else:
-        limited = filtered[:limit]
+        frequency_map = get_frequency_map(lang)
+        priority_mode = None
+        if current_user:
+            priority_mode = get_user_priority_mode(current_user.id, db)
+            user_vocab = get_user_vocabulary_words(current_user.id, db, lang)
+            filtered = filter_by_priority_mode(words, frequency_map, user_vocab, priority_mode, lang)
+        else:
+            filtered = filter_vocabulary(words, frequency_map, language=lang)
+
+        # Apply mining limits if requested
+        if apply_limits and duration_seconds is not None:
+            mining_result = apply_mining_limits(
+                vocabulary=filtered,
+                subtitles=subtitle_data["subtitles"],
+                duration_seconds=duration_seconds,
+                user_id=current_user.id if current_user else None,
+                video_id=video_id,
+                language=lang,
+                db=db if current_user else None
+            )
+            limited = mining_result['vocabulary']
+            mining_info = {
+                'session_cap': mining_result['session_cap'],
+                'excluded_previously_mined': mining_result['excluded_previously_mined'],
+                'high_frequency_count': mining_result['high_frequency_count'],
+                'duration_minutes': mining_result['duration_minutes'],
+                'applied_limits': True
+            }
+        else:
+            limited = filtered[:limit]
 
     stats = get_vocab_stats(limited)
 
