@@ -1,4 +1,5 @@
 import time
+import asyncio
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -6,6 +7,8 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.api.deps import get_current_user
 from app.models.user import User
+from app.models.user_vocabulary_list import UserVocabularyList
+from app.models.user_vocabulary_word import UserVocabularyWord
 from app.services.video_store import (
     add_video, get_all_videos, get_filtered_videos,
     get_unchecked_videos, update_korean_status,
@@ -48,6 +51,99 @@ class TitleUpdate(BaseModel):
 class WatchTimeUpdate(BaseModel):
     video_id: str
     seconds: int
+
+
+HOME_QUEUE_VIDEO_LIMIT = 8
+HOME_QUEUE_WORDS_PER_VIDEO = 6
+HOME_QUEUE_BUILD_CONCURRENCY = 8
+
+
+@router.get("/home/queue")
+async def get_home_queue(
+    lang: str = "ko",
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Build the practice queue in one authenticated request.
+
+    The old Home flow first fetched history, then made up to three additional
+    browser requests per video. Keeping the candidate selection and card
+    assembly together avoids that request fan-out while preserving the
+    client-side FSRS ordering and local deleted-card state.
+    """
+    # Imports stay local to keep this router independent from the vocabulary
+    # and flashcard routers during application startup.
+    from app.api.routes.flashcards import _build_one_flashcard, _load_flashcard_context
+    from app.api.routes.vocabulary import get_vocabulary
+
+    uploaded_words = (
+        db.query(UserVocabularyWord)
+        .join(UserVocabularyList)
+        .filter(
+            UserVocabularyList.user_id == current_user.id,
+            UserVocabularyList.language == lang,
+        )
+        .order_by(UserVocabularyList.created_at, UserVocabularyWord.sort_order)
+        .all()
+    )
+    cards = [
+        {
+            "target_word": word.word,
+            "dictionary_form": word.word,
+            "english": word.translation,
+            "video_id": None,
+            "video_title": "Your vocabulary list",
+        }
+        for word in uploaded_words
+    ]
+
+    videos = get_user_filtered_videos(db, current_user.id, lang)[:HOME_QUEUE_VIDEO_LIMIT]
+    card_jobs: list[tuple[str, str, str, dict]] = []
+    for video in videos:
+        try:
+            # Home needs a compact varied queue, not the full video deck. Skip
+            # the deck-upgrade write work here; review sessions still perform
+            # it through their existing vocabulary endpoint.
+            vocabulary = await get_vocabulary(
+                video_id=video["video_id"],
+                limit=HOME_QUEUE_WORDS_PER_VIDEO,
+                lang=lang,
+                db=db,
+                current_user=current_user,
+                upgrade_cards=False,
+            )
+            words = [item["word"] for item in vocabulary.get("vocabulary", [])]
+            if not words:
+                continue
+            context = await asyncio.to_thread(_load_flashcard_context, video["video_id"], lang)
+            card_jobs.extend((word, video["video_id"], video["title"], context) for word in words)
+        except Exception:
+            # A watched video may still be processing subtitles. It should not
+            # make the whole home queue fail.
+            continue
+
+    semaphore = asyncio.Semaphore(HOME_QUEUE_BUILD_CONCURRENCY)
+
+    async def build_card(job: tuple[str, str, str, dict]) -> dict | None:
+        word, video_id, video_title, context = job
+        async with semaphore:
+            try:
+                card = await asyncio.to_thread(_build_one_flashcard, word, video_id, lang, context)
+                card["video_title"] = video_title
+                return card
+            except Exception:
+                # One uncached translation or malformed subtitle should not
+                # blank the complete Home queue.
+                return None
+
+    generated = await asyncio.gather(*(build_card(job) for job in card_jobs))
+    cards.extend(card for card in generated if card is not None)
+
+    # Match the old UI's last-write-wins deduplication. Keep every uploaded
+    # word: the browser owns FSRS priority, so truncating this list here could
+    # hide a locally due card before it gets a chance to be selected.
+    card_by_key = {card["dictionary_form"] or card["target_word"]: card for card in cards}
+    return {"lang": lang, "cards": list(card_by_key.values())}
 
 
 @router.post("/track")

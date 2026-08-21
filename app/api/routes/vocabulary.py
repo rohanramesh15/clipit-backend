@@ -47,6 +47,7 @@ async def get_vocabulary(
     lang: str = Query('ko'),
     apply_limits: bool = Query(False, description="Apply mining limits (cap cards per duration, enforce gaps)"),
     duration_seconds: Optional[float] = Query(None, description="Video duration in seconds (required when apply_limits=True)"),
+    upgrade_cards: bool = True,
     db: Session = Depends(get_db),
     current_user: Optional[User] = Depends(get_current_user_optional),
 ):
@@ -139,7 +140,7 @@ async def get_vocabulary(
 
     # Auto-upgrade TTS cards with video context for authenticated users
     upgraded_count = 0
-    if current_user:
+    if current_user and upgrade_cards:
         upgraded_words = auto_upgrade_tts_cards(
             user_id=current_user.id,
             video_id=video_id,
