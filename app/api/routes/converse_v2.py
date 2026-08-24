@@ -611,6 +611,9 @@ def recent_session(
             "started_at": sess.started_at.isoformat(),
             "turn_count": turn_count,
             "last_line": last_turn.text if last_turn else "",
+            # Mixed sessions have no single seed_video_id — this lets the
+            # Resume card show a thumbnail stack of the videos it drew from.
+            "due_words": json.loads(sess.due_words_json or "[]"),
         }
     }
 
