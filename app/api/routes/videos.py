@@ -57,12 +57,11 @@ async def get_home_queue(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Return the complete durable word inventory from watched captions.
+    """Return useful, practice-ready vocabulary from watched captions.
 
-    This is intentionally separate from a practice deck: it does no
-    translation, context, or flashcard-generation work.  That keeps the Home
-    page fast while ensuring the learner can see every captured word instead
-    of a small, opaque preview chosen from a few recent videos.
+    Home uses the same frequency-list and user-priority filtering as the
+    practice modes. This avoids presenting every raw caption token (including
+    common words and Korean surface-form variants) as vocabulary to learn.
     """
     from app.api.routes.vocabulary import get_vocabulary
 
@@ -75,7 +74,7 @@ async def get_home_queue(
     }.get(lang, "has_korean")
     watched_titles = {video["video_id"]: video["title"] for video in all_watched_videos}
 
-    # Reuse locally cached definitions when available.  The Home inventory
+    # Reuse locally cached definitions when available.  The Home queue
     # never waits for a remote translation or flashcard-generation request.
     from app.api.routes.flashcards import load_definitions, load_user_definitions
     definitions = load_definitions()
@@ -118,7 +117,10 @@ async def get_home_queue(
                 db=db,
                 current_user=current_user,
                 upgrade_cards=False,
-                include_all=True,
+                # Keep the same focused candidate set used by practice: the
+                # user's priority mode, common-word filtering, and 20 words
+                # per watched source all apply inside get_vocabulary.
+                limit=20,
             )
             vocabulary_items = vocabulary.get("vocabulary", [])
             words = [item["word"] for item in vocabulary_items]
@@ -141,8 +143,8 @@ async def get_home_queue(
                 "video_title": video["title"],
             })
 
-    # A word inventory is distinct by word, preserving the most recently
-    # watched source video.  It is deliberately not capped.
+    # Deduplicate useful words across watched sources, preserving the most
+    # recently watched source video.
     card_by_key: dict[str, dict] = {}
     for card in cards:
         card_by_key.setdefault(card["dictionary_form"] or card["target_word"], card)
