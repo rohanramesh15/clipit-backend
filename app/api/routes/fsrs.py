@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel as PydanticModel
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -9,6 +10,7 @@ from app.api.deps import get_current_user
 from app.models.user import User
 from app.models.user_flashcard_progress import UserFlashcardProgress
 from app.models.user_review_history import UserReviewHistory
+from app.services.video_store import get_total_watch_time
 
 router = APIRouter()
 
@@ -245,6 +247,52 @@ def get_reviews(
             }
             for r in rows
         ],
+    }
+
+
+@router.get("/progress-summary")
+def get_progress_summary(
+    lang: str = "ko",
+    year: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return the compact aggregate data needed by the Progress page.
+
+    The UI needs a total and one count per active day, not every individual
+    review event. Aggregating in Postgres keeps a long review history from
+    turning a Progress visit into a multi-megabyte response.
+    """
+    target_year = year or datetime.utcnow().year
+    start = datetime(target_year, 1, 1)
+    end = datetime(target_year + 1, 1, 1)
+    reviews = db.query(UserReviewHistory).filter(
+        UserReviewHistory.user_id == current_user.id,
+    )
+    total_reviews = reviews.count()
+    daily_rows = (
+        db.query(
+            func.date(UserReviewHistory.reviewed_at).label("date"),
+            func.count(UserReviewHistory.id).label("count"),
+        )
+        .filter(
+            UserReviewHistory.user_id == current_user.id,
+            UserReviewHistory.reviewed_at >= start,
+            UserReviewHistory.reviewed_at < end,
+        )
+        .group_by(func.date(UserReviewHistory.reviewed_at))
+        .order_by(func.date(UserReviewHistory.reviewed_at))
+        .all()
+    )
+    reviews_by_date = {
+        value.isoformat() if hasattr(value, "isoformat") else str(value): count
+        for value, count in daily_rows
+    }
+    watch_time = get_total_watch_time(db, current_user.id, lang)
+    return {
+        "total_reviews": total_reviews,
+        "reviews_by_date": reviews_by_date,
+        "total_hours": watch_time.get("total_hours", 0),
     }
 
 
