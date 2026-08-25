@@ -64,6 +64,27 @@ async def get_vocabulary(
     - Prioritize words appearing 2+ times in subtitles
     - Exclude words already mined from this video (authenticated users)
     """
+    return await _extract_vocabulary(
+        video_id, limit, lang, include_all, apply_limits, duration_seconds, upgrade_cards, db, current_user,
+    )
+
+
+async def _extract_vocabulary(
+    video_id: str,
+    limit: int,
+    lang: str,
+    include_all: bool,
+    apply_limits: bool,
+    duration_seconds: Optional[float],
+    upgrade_cards: bool,
+    db: Session,
+    current_user: Optional[User],
+    # Callers iterating over many videos for the same user (e.g. the Home
+    # queue) can pass these in pre-fetched so this doesn't re-run the same
+    # user-scoped (not video-scoped) queries once per video.
+    priority_mode: Optional[str] = None,
+    user_vocab: Optional[list] = None,
+):
     # Handle Netflix videos
     if video_id.startswith('netflix_'):
         subtitle_data = load_cached_netflix_subtitles(video_id, lang)
@@ -117,12 +138,14 @@ async def get_vocabulary(
     # If user is authenticated, apply priority mode (works for all supported languages)
     else:
         frequency_map = get_frequency_map(lang)
-        priority_mode = None
         if current_user:
-            priority_mode = get_user_priority_mode(current_user.id, db)
-            user_vocab = get_user_vocabulary_words(current_user.id, db, lang)
+            if priority_mode is None:
+                priority_mode = get_user_priority_mode(current_user.id, db)
+            if user_vocab is None:
+                user_vocab = get_user_vocabulary_words(current_user.id, db, lang)
             filtered = filter_by_priority_mode(words, frequency_map, user_vocab, priority_mode, lang)
         else:
+            priority_mode = None
             filtered = filter_vocabulary(words, frequency_map, language=lang)
 
         # Apply mining limits if requested

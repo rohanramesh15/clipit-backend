@@ -68,7 +68,8 @@ async def get_home_queue(
     practice modes. This avoids presenting every raw caption token (including
     common words and Korean surface-form variants) as vocabulary to learn.
     """
-    from app.api.routes.vocabulary import get_vocabulary
+    from app.api.routes.vocabulary import _extract_vocabulary
+    from app.api.routes.user_vocab import get_user_priority_mode, get_user_vocabulary_words
 
     all_watched_videos = get_user_videos(db, current_user.id)
     source_video_count = len(all_watched_videos)
@@ -93,6 +94,11 @@ async def get_home_queue(
         )
         .all()
     )
+    # Both are keyed on the user (and, for vocab, the language) only — not the
+    # video — so fetch them once instead of once per watched video below.
+    priority_mode = get_user_priority_mode(current_user.id, db)
+    user_vocab = get_user_vocabulary_words(current_user.id, db, lang)
+
     cards: list[dict] = []
     for saved_card in saved_cards:
         if saved_card.video_id not in watched_titles:
@@ -116,16 +122,22 @@ async def get_home_queue(
         if video.get(language_status_key) is False:
             continue
         try:
-            vocabulary = await get_vocabulary(
-                video_id=video["video_id"],
-                lang=lang,
-                db=db,
-                current_user=current_user,
-                upgrade_cards=False,
+            vocabulary = await _extract_vocabulary(
+                video["video_id"],
+                HOME_QUEUE_WORDS_PER_VIDEO,
+                lang,
+                False,  # include_all
+                False,  # apply_limits
+                None,  # duration_seconds
+                False,  # upgrade_cards
+                db,
+                current_user,
                 # Keep the same focused candidate set used by practice: the
                 # user's priority mode, common-word filtering, and a bounded
-                # number of words per watched source all apply here.
-                limit=HOME_QUEUE_WORDS_PER_VIDEO,
+                # number of words per watched source all apply here. Passed
+                # in pre-fetched so this doesn't re-query them per video.
+                priority_mode=priority_mode,
+                user_vocab=user_vocab,
             )
             vocabulary_items = vocabulary.get("vocabulary", [])
             words = [item["word"] for item in vocabulary_items]

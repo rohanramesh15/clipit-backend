@@ -50,7 +50,7 @@ from app.services.vocab_service import load_frequency_map, filter_by_priority_mo
 from app.api.routes.netflix import load_cached_netflix_subtitles
 from app.api.routes.user_vocab import get_user_priority_mode, get_user_vocabulary_words
 from app.api.routes.flashcards import iter_flashcard_data
-from app.api.routes.chat import _wrap_pcm_as_wav
+from app.api.routes.chat import _wrap_pcm_as_wav, ALLOWED_TTS_VOICES
 from app.services.gemini_chat_service import synthesize_tts
 
 router = APIRouter()
@@ -105,9 +105,15 @@ def _complete_speech_segments(buffer: str) -> tuple[list[str], str]:
     return segments, buffer[end:]
 
 
-def _speech_sse(text: str) -> str:
+def _resolve_voice(voice: Optional[str]) -> str:
+    """The learner's chosen AI voice, falling back to the default for an
+    unset or unrecognized value (never pass an arbitrary string to Gemini)."""
+    return voice if voice in ALLOWED_TTS_VOICES else _LIVE_VOICE
+
+
+def _speech_sse(text: str, voice: Optional[str] = None) -> str:
     """Encode a short Gemini-voice WAV clip for an SSE speech event."""
-    pcm = synthesize_tts(text, voice_name=_LIVE_VOICE)
+    pcm = synthesize_tts(text, voice_name=_resolve_voice(voice))
     if not pcm:
         raise RuntimeError("TTS returned no audio")
     wav_b64 = base64.b64encode(_wrap_pcm_as_wav(pcm)).decode("ascii")
@@ -385,6 +391,7 @@ class SessionRequest(BaseModel):
 class TurnRequest(BaseModel):
     text: str
     language: str = "ko"
+    voice: Optional[str] = None
 
 
 class HowDoISayRequest(BaseModel):
@@ -404,6 +411,7 @@ class RomanizeRequest(BaseModel):
 
 class LangBody(BaseModel):
     language: str = "ko"
+    voice: Optional[str] = None
 
 
 class SessionFeedbackRequest(BaseModel):
@@ -611,6 +619,8 @@ def stream_opening(
     if sess.seed_label:
         seed["title"] = sess.seed_label
 
+    voice = _resolve_voice(body.voice)
+
     def event_stream():
         try:
             result = None
@@ -621,7 +631,7 @@ def stream_opening(
                     segments, pending_speech = _complete_speech_segments(pending_speech)
                     for segment in segments:
                         try:
-                            yield _speech_sse(segment)
+                            yield _speech_sse(segment, voice)
                         except Exception:
                             # Preserve text streaming if a transient TTS call
                             # fails; the frontend can still render the reply.
@@ -630,7 +640,7 @@ def stream_opening(
                     result = payload
             if pending_speech.strip():
                 try:
-                    yield _speech_sse(pending_speech)
+                    yield _speech_sse(pending_speech, voice)
                 except Exception:
                     yield f"data: {json.dumps({'type': 'chunk', 'text': pending_speech})}\n\n"
         except Exception as error:
@@ -846,6 +856,8 @@ def chat_turn_stream(
     db.add(user_turn)
     db.commit()
 
+    voice = _resolve_voice(req.voice)
+
     def event_stream():
         result: Optional[dict] = None
         try:
@@ -856,7 +868,7 @@ def chat_turn_stream(
                     segments, pending_speech = _complete_speech_segments(pending_speech)
                     for segment in segments:
                         try:
-                            yield _speech_sse(segment)
+                            yield _speech_sse(segment, voice)
                         except Exception:
                             yield f"data: {json.dumps({'type': 'chunk', 'text': segment})}\n\n"
                 else:
@@ -867,7 +879,7 @@ def chat_turn_stream(
 
         if pending_speech.strip():
             try:
-                yield _speech_sse(pending_speech)
+                yield _speech_sse(pending_speech, voice)
             except Exception:
                 yield f"data: {json.dumps({'type': 'chunk', 'text': pending_speech})}\n\n"
 
@@ -1102,12 +1114,13 @@ _live_client: Optional[genai.Client] = None
 @router.get("/turn/{turn_id}/audio")
 def get_turn_audio(
     turn_id: int,
+    voice: Optional[str] = Query(None),
     db: Session = Depends(get_db),
     current_user: Optional[User] = Depends(get_current_user_optional),
 ):
-    """Re-synthesize an assistant turn's text with the same Gemini voice used
-    in the live conversation (_LIVE_VOICE), so "Listen" plays back in the
-    voice the tutor actually spoke in rather than a mismatched browser voice."""
+    """Re-synthesize an assistant turn's text with the learner's chosen AI
+    voice (falling back to the default), so "Listen" plays back in the voice
+    the tutor actually spoke in rather than a mismatched browser voice."""
     turn = db.query(m.CV2Turn).filter(m.CV2Turn.id == turn_id).first()
     if not turn:
         raise HTTPException(status_code=404, detail="Turn not found")
@@ -1117,7 +1130,7 @@ def get_turn_audio(
     _load_owned_session(db, turn.session_id, current_user)  # 404s if not owned
 
     try:
-        audio_bytes = synthesize_tts(turn.text, voice_name=_LIVE_VOICE)
+        audio_bytes = synthesize_tts(turn.text, voice_name=_resolve_voice(voice))
     except Exception as e:
         print(f"[converse2] TTS failed: {e}")
         raise HTTPException(status_code=500, detail="TTS generation failed")
@@ -1159,6 +1172,7 @@ async def voice_ws(
     websocket: WebSocket,
     session_id: int = Query(..., description="cv2 session id from POST /session"),
     language: str = Query("ko", description="target language: uk | ko"),
+    voice: Optional[str] = Query(None, description="learner's chosen AI voice; falls back to the default"),
 ):
     """Browser ↔ Gemini Live relay for a cv2 sandbox session.
 
@@ -1190,7 +1204,7 @@ async def voice_ws(
             "response_modalities": ["AUDIO"],
             "speech_config": {
                 "voice_config": {
-                    "prebuilt_voice_config": {"voice_name": _LIVE_VOICE},
+                    "prebuilt_voice_config": {"voice_name": _resolve_voice(voice)},
                 },
             },
             "system_instruction": {"parts": [{"text": system_instruction}]},
