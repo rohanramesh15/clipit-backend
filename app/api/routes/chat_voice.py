@@ -20,6 +20,7 @@ Wire format:
 """
 
 import asyncio
+import contextlib
 import json
 import traceback
 from typing import Optional
@@ -173,41 +174,62 @@ async def voice_ws(
                             return
 
             async def pump_gemini_to_client():
-                """Gemini audio + transcripts → browser."""
-                async for response in live.receive():
-                    audio = getattr(response, "data", None)
-                    if audio:
-                        await websocket.send_bytes(audio)
+                """Gemini audio + transcripts → browser.
 
-                    sc = getattr(response, "server_content", None)
-                    if not sc:
-                        continue
+                live.receive() is scoped to a single turn — its generator
+                returns right after yielding the turn_complete message — so
+                without the outer loop this pump would quietly finish after
+                the first exchange while pump_client_to_gemini keeps feeding
+                the mic to Gemini, leaving the call silently one-directional
+                for every turn after the first.
+                """
+                while True:
+                    async for response in live.receive():
+                        audio = getattr(response, "data", None)
+                        if audio:
+                            await websocket.send_bytes(audio)
 
-                    inp_t = getattr(sc, "input_transcription", None)
-                    if inp_t and getattr(inp_t, "text", None):
-                        await websocket.send_json({
-                            "event": "user_transcript",
-                            "text": inp_t.text,
-                        })
+                        sc = getattr(response, "server_content", None)
+                        if not sc:
+                            continue
 
-                    out_t = getattr(sc, "output_transcription", None)
-                    if out_t and getattr(out_t, "text", None):
-                        await websocket.send_json({
-                            "event": "assistant_transcript",
-                            "text": out_t.text,
-                        })
+                        inp_t = getattr(sc, "input_transcription", None)
+                        if inp_t and getattr(inp_t, "text", None):
+                            await websocket.send_json({
+                                "event": "user_transcript",
+                                "text": inp_t.text,
+                            })
 
-                    if getattr(sc, "interrupted", False):
-                        await websocket.send_json({"event": "interrupted"})
+                        out_t = getattr(sc, "output_transcription", None)
+                        if out_t and getattr(out_t, "text", None):
+                            await websocket.send_json({
+                                "event": "assistant_transcript",
+                                "text": out_t.text,
+                            })
 
-                    if getattr(sc, "turn_complete", False):
-                        await websocket.send_json({"event": "turn_complete"})
+                        if getattr(sc, "interrupted", False):
+                            await websocket.send_json({"event": "interrupted"})
 
-            await asyncio.gather(
-                pump_client_to_gemini(),
-                pump_gemini_to_client(),
-                return_exceptions=True,
+                        if getattr(sc, "turn_complete", False):
+                            await websocket.send_json({"event": "turn_complete"})
+
+            up = asyncio.create_task(pump_client_to_gemini())
+            down = asyncio.create_task(pump_gemini_to_client())
+            # Either pump ending (hangup, disconnect, or an error) should end
+            # the call — pump_gemini_to_client now loops forever on its own,
+            # so nothing else would stop it once pump_client_to_gemini exits.
+            done, pending = await asyncio.wait(
+                {up, down}, return_when=asyncio.FIRST_COMPLETED
             )
+            for task in pending:
+                task.cancel()
+            for task in pending:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            for task in done:
+                exc = task.exception()
+                if exc:
+                    raise exc
 
     except WebSocketDisconnect:
         pass
