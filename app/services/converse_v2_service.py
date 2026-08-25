@@ -676,7 +676,9 @@ def coach_english(profile: dict, due_words: list[str], history: list[dict], engl
         f"2) explanation: a short, friendly English explanation of how that {name} sentence works "
         "(break down the key words if helpful).\n"
         "3) advanced_topic: a short grammar topic name relevant here (e.g. 'Object Pronouns').\n"
-        "4) advanced_detail: a detailed paragraph explaining that grammar point in this context.\n\n"
+        "4) advanced_detail: a concise mini-lesson explaining that grammar point in this context. "
+        "Use one short opening sentence, then 2–4 Markdown bullets. Start each bullet with a bold label "
+        "such as **Meaning**, **Use**, or **Example**; include Korean examples where useful.\n\n"
         f"Conversation so far:\n{convo}\n\n"
         'Return ONLY JSON: {"corrected": "...", "explanation": "...", "advanced_topic": "...", "advanced_detail": "..."}'
     )
