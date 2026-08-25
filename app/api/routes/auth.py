@@ -1,13 +1,20 @@
+import logging
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_current_user_with_new_flag
 from app.core.config import settings
 from app.core.database import get_db
 from app.models.deck_settings import DeckSettings
+from app.models.chat import ChatSavedWord, ChatSession
+from app.models.chat_memory import ChatMemoryFact
+from app.models.community_group import CommunityGroup
+from app.models.community_membership import CommunityMembership
+from app.models.converse_v2 import CV2Feedback, CV2Session, CV2Turn
 from app.models.user import User
 from app.models.user_anki_progress import UserAnkiProgress
 from app.models.user_flashcard_progress import UserFlashcardProgress
@@ -16,10 +23,12 @@ from app.models.user_review_history import UserReviewHistory
 from app.models.user_video_watch import UserVideoWatch
 from app.models.user_vocabulary_list import UserVocabularyList
 from app.models.user_vocabulary_settings import UserVocabularySettings
+from app.models.user_language_profile import UserLanguageProfile
 from app.schemas.user import UserResponse
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @router.get("/auth/me", response_model=UserResponse)
@@ -54,10 +63,21 @@ def _delete_supabase_user(supabase_user_id: str) -> None:
     try:
         with urlopen(request, timeout=15):
             pass
-    except (HTTPError, URLError, OSError) as exc:
+    except HTTPError as exc:
+        # A previous attempt can have completed Auth deletion just before its
+        # response was lost. Treat that retry as complete, not as an error.
+        if exc.code == status.HTTP_404_NOT_FOUND:
+            return
+        logger.warning("Supabase Admin account deletion failed with status %s", exc.code)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Could not delete the Supabase Auth account",
+            detail="Could not delete your sign-in account. Nothing was deleted; please try again.",
+        ) from exc
+    except (URLError, OSError) as exc:
+        logger.warning("Supabase Admin account deletion could not be reached: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Could not reach the sign-in service. Nothing was deleted; please try again.",
         ) from exc
 
 
@@ -72,17 +92,41 @@ def delete_me(
 
     user_id = current_user.id
     supabase_user_id = str(current_user.supabase_user_id)
-    # Explicitly clear user-owned rows. Some FKs use ON DELETE CASCADE and some
-    # do not, so deleting all known direct dependents keeps this resilient.
-    db.query(UserReviewHistory).filter(UserReviewHistory.user_id == user_id).delete(synchronize_session=False)
-    db.query(UserFlashcardProgress).filter(UserFlashcardProgress.user_id == user_id).delete(synchronize_session=False)
-    db.query(UserVideoWatch).filter(UserVideoWatch.user_id == user_id).delete(synchronize_session=False)
-    db.query(UserAnkiProgress).filter(UserAnkiProgress.user_id == user_id).delete(synchronize_session=False)
-    db.query(UserMinedWord).filter(UserMinedWord.user_id == user_id).delete(synchronize_session=False)
-    db.query(DeckSettings).filter(DeckSettings.user_id == user_id).delete(synchronize_session=False)
-    db.query(UserVocabularySettings).filter(UserVocabularySettings.user_id == user_id).delete(synchronize_session=False)
-    db.query(UserVocabularyList).filter(UserVocabularyList.user_id == user_id).delete(synchronize_session=False)
-    db.delete(current_user)
-    db.commit()
+    try:
+        # Explicitly clear every user-owned record. Some legacy foreign keys do
+        # not cascade, so relying on deleting the user row alone is unsafe.
+        cv2_session_ids = db.query(CV2Session.id).filter(CV2Session.user_id == user_id).subquery()
+        db.query(CV2Feedback).filter(CV2Feedback.session_id.in_(cv2_session_ids)).delete(synchronize_session=False)
+        db.query(CV2Turn).filter(CV2Turn.session_id.in_(cv2_session_ids)).delete(synchronize_session=False)
+        db.query(CV2Session).filter(CV2Session.user_id == user_id).delete(synchronize_session=False)
+        db.query(ChatMemoryFact).filter(ChatMemoryFact.user_id == user_id).delete(synchronize_session=False)
+        db.query(ChatSavedWord).filter(ChatSavedWord.user_id == user_id).delete(synchronize_session=False)
+        db.query(ChatSession).filter(ChatSession.user_id == user_id).delete(synchronize_session=False)
+        db.query(UserReviewHistory).filter(UserReviewHistory.user_id == user_id).delete(synchronize_session=False)
+        db.query(UserFlashcardProgress).filter(UserFlashcardProgress.user_id == user_id).delete(synchronize_session=False)
+        db.query(UserVideoWatch).filter(UserVideoWatch.user_id == user_id).delete(synchronize_session=False)
+        db.query(UserAnkiProgress).filter(UserAnkiProgress.user_id == user_id).delete(synchronize_session=False)
+        db.query(UserMinedWord).filter(UserMinedWord.user_id == user_id).delete(synchronize_session=False)
+        db.query(DeckSettings).filter(DeckSettings.user_id == user_id).delete(synchronize_session=False)
+        db.query(UserVocabularySettings).filter(UserVocabularySettings.user_id == user_id).delete(synchronize_session=False)
+        db.query(UserVocabularyList).filter(UserVocabularyList.user_id == user_id).delete(synchronize_session=False)
+        db.query(UserLanguageProfile).filter(UserLanguageProfile.user_id == user_id).delete(synchronize_session=False)
+        db.query(CommunityMembership).filter(CommunityMembership.user_id == user_id).delete(synchronize_session=False)
+        db.query(CommunityGroup).filter(CommunityGroup.creator_id == user_id).delete(synchronize_session=False)
+        db.delete(current_user)
 
-    _delete_supabase_user(supabase_user_id)
+        # Validate all local deletes before touching Supabase. If Auth deletion
+        # fails, rollback restores the complete local account and a retry is safe.
+        db.flush()
+        _delete_supabase_user(supabase_user_id)
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except SQLAlchemyError as exc:
+        db.rollback()
+        logger.exception("Local account deletion failed for user %s", user_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not delete account data. Nothing was deleted; please try again.",
+        ) from exc
