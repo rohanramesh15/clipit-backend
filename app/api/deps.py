@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.config import settings
 from app.models.user import User
+from app.services.account_deletion import delete_local_user_data
 
 bearer_scheme = HTTPBearer()
 bearer_scheme_optional = HTTPBearer(auto_error=False)
@@ -88,17 +89,31 @@ def get_current_user_from_token(token: str, db: Session) -> tuple[User, bool]:
         metadata = payload.get("user_metadata") or {}
 
         # An account with this email may already exist from before Supabase
-        # Auth (the old email/password or Google flow) — link it instead of
-        # inserting a duplicate, which would violate the email uniqueness
-        # constraint.
+        # Auth (the old email/password or Google flow). A row with no
+        # Supabase ID is a genuine legacy profile and should be linked. A row
+        # with a *different* Supabase ID is a newly created account reusing an
+        # email after deletion; retaining it would resurrect old learning data
+        # and skip onboarding, so replace it with a clean profile instead.
         existing = db.query(User).filter(User.email == email).first()
         if existing is not None:
-            existing.supabase_user_id = supabase_user_id
-            existing.full_name = existing.full_name or metadata.get("full_name") or metadata.get("name")
-            existing.profile_picture = existing.profile_picture or metadata.get("avatar_url") or metadata.get("picture")
+            if existing.supabase_user_id is not None and existing.supabase_user_id != supabase_user_id:
+                delete_local_user_data(db, existing)
+                db.flush()
+                is_new = True
+                user = User(
+                    email=email,
+                    full_name=metadata.get("full_name") or metadata.get("name"),
+                    profile_picture=metadata.get("avatar_url") or metadata.get("picture"),
+                    supabase_user_id=supabase_user_id,
+                )
+                db.add(user)
+            else:
+                existing.supabase_user_id = supabase_user_id
+                existing.full_name = existing.full_name or metadata.get("full_name") or metadata.get("name")
+                existing.profile_picture = existing.profile_picture or metadata.get("avatar_url") or metadata.get("picture")
+                user = existing
             db.commit()
-            db.refresh(existing)
-            user = existing
+            db.refresh(user)
         else:
             is_new = True
             user = User(
@@ -123,7 +138,21 @@ def get_current_user_from_token(token: str, db: Session) -> tuple[User, bool]:
                 if user is None:
                     raise
                 if user.supabase_user_id != supabase_user_id:
-                    user.supabase_user_id = supabase_user_id
+                    if user.supabase_user_id is not None:
+                        # The concurrent winner found an old account by email.
+                        # Preserve the same fresh-account rule as the normal
+                        # path instead of reattaching it to stale data.
+                        delete_local_user_data(db, user)
+                        db.flush()
+                        user = User(
+                            email=email,
+                            full_name=metadata.get("full_name") or metadata.get("name"),
+                            profile_picture=metadata.get("avatar_url") or metadata.get("picture"),
+                            supabase_user_id=supabase_user_id,
+                        )
+                        db.add(user)
+                    else:
+                        user.supabase_user_id = supabase_user_id
                     db.commit()
                     db.refresh(user)
     if not user.is_active:
