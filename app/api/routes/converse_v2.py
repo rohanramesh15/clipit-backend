@@ -468,6 +468,7 @@ def get_mixed_sources(
     return {
         "word_count": len(candidates),
         "max_words": MIXED_WORD_LIMIT,
+        "words": [candidate["word"] for candidate in candidates],
         "videos": _mixed_source_videos(candidates),
     }
 

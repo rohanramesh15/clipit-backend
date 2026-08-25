@@ -681,6 +681,14 @@ def coach_english(profile: dict, due_words: list[str], history: list[dict], engl
         'Return ONLY JSON: {"corrected": "...", "explanation": "...", "advanced_topic": "...", "advanced_detail": "..."}'
     )
     data = _generate_json(system, user, temperature=0.5)
+    # A rare empty structured response used to reach the Coach drawer as an
+    # em dash. Retry once with an explicit required-field reminder.
+    if not str(data.get("corrected") or "").strip():
+        data = _generate_json(
+            system,
+            f"{user}\n\nYour corrected field was empty. Return complete JSON now with a non-empty corrected {name} phrase.",
+            temperature=0.35,
+        )
     return {
         "corrected": data.get("corrected") or "",
         "explanation": data.get("explanation") or "",
