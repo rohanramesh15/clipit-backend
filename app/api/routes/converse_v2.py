@@ -776,14 +776,27 @@ def resume_session(
     }
 
 
+# Short-term memory window: how many of the most recent turns (learner +
+# assistant messages combined) get sent to the model as conversation context
+# on every call. Older turns stay in the DB — visible in the transcript and
+# on resume — they just drop out of the model's context once a session runs
+# longer than this, so cost/latency stay bounded and the model stays focused
+# on the current thread instead of the whole session history. ~10 exchanges
+# is enough for the model to track what's actually being discussed right now
+# (callbacks to something said a few turns back still work) without hauling
+# in the entire conversation on every request.
+RECENT_HISTORY_TURNS = 20
+
+
 def _history(db: Session, session_id: int) -> list[dict]:
     rows = (
         db.query(m.CV2Turn)
         .filter(m.CV2Turn.session_id == session_id)
-        .order_by(m.CV2Turn.idx.asc())
+        .order_by(m.CV2Turn.idx.desc())
+        .limit(RECENT_HISTORY_TURNS)
         .all()
     )
-    return [{"role": r.role, "text": r.text} for r in rows]
+    return [{"role": r.role, "text": r.text} for r in reversed(rows)]
 
 
 def _next_idx(db: Session, session_id: int) -> int:
@@ -987,7 +1000,11 @@ def suggest_stream(
     def event_stream():
         suggestions: list[dict] = []
         try:
-            for suggestion in svc.generate_suggestions_stream(profile, due_words, history, req.language):
+            for event in svc.generate_suggestions_stream(profile, due_words, history, req.language):
+                if event["type"] == "delta":
+                    yield f"data: {json.dumps(event)}\n\n"
+                    continue
+                suggestion = event["suggestion"]
                 suggestions.append(suggestion)
                 yield f"data: {json.dumps({'type': 'suggestion', 'suggestion': suggestion})}\n\n"
             yield f"data: {json.dumps({'type': 'done', 'suggested_replies': suggestions})}\n\n"

@@ -444,7 +444,7 @@ def generate_suggestions(profile: dict, due_words: list[str], history: list[dict
 
 
 def generate_suggestions_stream(profile: dict, due_words: list[str], history: list[dict], language: str = "ko"):
-    """Yield suggested replies as the model completes each JSONL row.
+    """Yield model deltas plus suggested replies as each JSONL row completes.
 
     A normal JSON array cannot be safely rendered until its closing bracket is
     received. JSON Lines lets the client reveal one complete learner reply at a
@@ -488,6 +488,10 @@ def generate_suggestions_stream(profile: dict, due_words: list[str], history: li
         piece = getattr(chunk, "text", None) or ""
         if not piece:
             continue
+        # Forward raw model deltas immediately. The UI uses the unfinished
+        # current JSONL row to reveal the target-language suggestion as it is
+        # generated, instead of showing an indeterminate loading animation.
+        yield {"type": "delta", "text": piece}
         raw += piece
         buffer += piece
         while "\n" in buffer:
@@ -495,12 +499,12 @@ def generate_suggestions_stream(profile: dict, due_words: list[str], history: li
             suggestion = parse_reply(line)
             if suggestion and len(emitted) < 3:
                 emitted.append(suggestion)
-                yield suggestion
+                yield {"type": "suggestion", "suggestion": suggestion}
 
     final_suggestion = parse_reply(buffer)
     if final_suggestion and len(emitted) < 3:
         emitted.append(final_suggestion)
-        yield final_suggestion
+        yield {"type": "suggestion", "suggestion": final_suggestion}
 
     # Gemini can legally format a JSON object over several lines even when
     # asked for JSONL. Recover every complete object from the whole response,
@@ -525,7 +529,7 @@ def generate_suggestions_stream(profile: dict, due_words: list[str], history: li
             suggestion = {"es": value["es"].strip(), "en": str(value.get("en") or "").strip()}
             if suggestion not in emitted:
                 emitted.append(suggestion)
-                yield suggestion
+                yield {"type": "suggestion", "suggestion": suggestion}
 
     # The streaming model can occasionally return thought-only parts with no
     # usable JSON text. Keep the streamed route dependable by falling back to
@@ -535,7 +539,7 @@ def generate_suggestions_stream(profile: dict, due_words: list[str], history: li
         fallback = generate_suggestions(profile, due_words, history, language)
         for suggestion in fallback.get("suggested_replies", [])[:3]:
             if isinstance(suggestion, dict) and suggestion.get("es"):
-                yield suggestion
+                yield {"type": "suggestion", "suggestion": suggestion}
 
 
 def coach_english(profile: dict, due_words: list[str], history: list[dict], english: str, language: str = "ko") -> dict:
