@@ -606,19 +606,10 @@ def how_do_i_say(profile: dict, due_words: list[str], english: str, language: st
 
 
 def translate_to_english(text: str, language: str = "ko") -> str:
-    """Tap-to-translate. DeepL first, Gemini fallback."""
+    """Tap-to-translate, via Gemini."""
     text = (text or "").strip()
     if not text:
         return ""
-    if settings.DEEPL_API_KEY:
-        try:
-            import deepl
-
-            translator = deepl.Translator(settings.DEEPL_API_KEY)
-            result = translator.translate_text(text, target_lang="EN-US")
-            return result.text
-        except Exception:
-            pass
     try:
         name = _lang(language)["name"]
         client = _get_client()
