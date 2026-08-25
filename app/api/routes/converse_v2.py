@@ -645,6 +645,7 @@ def _turn_dict(row: m.CV2Turn) -> dict:
         "role": row.role,
         "text": row.text,
         "reply_translation": meta.get("reply_translation"),
+        "romanized": meta.get("romanized"),
         "correction": meta.get("correction"),
         "used_target_words": meta.get("used_target_words", []),
         "suggested_replies": meta.get("suggested_replies", []),
@@ -767,6 +768,7 @@ def chat_turn(
         meta_json=json.dumps(
             {
                 "reply_translation": result["reply_translation"],
+                "romanized": result["romanized"],
                 "correction": result["correction"],
                 "used_target_words": result["used_target_words"],
                 "suggested_replies": result["suggested_replies"],
@@ -827,6 +829,7 @@ def chat_turn_stream(
             meta_json=json.dumps(
                 {
                     "reply_translation": result["reply_translation"],
+                    "romanized": result["romanized"],
                     "correction": result["correction"],
                     "used_target_words": result["used_target_words"],
                     "suggested_replies": result["suggested_replies"],
@@ -874,6 +877,7 @@ def regenerate(
     last_asst.meta_json = json.dumps(
         {
             "reply_translation": result["reply_translation"],
+            "romanized": result["romanized"],
             "correction": result["correction"],
             "used_target_words": result["used_target_words"],
             "suggested_replies": result["suggested_replies"],
