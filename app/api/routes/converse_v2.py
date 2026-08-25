@@ -20,7 +20,7 @@ import traceback
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -47,6 +47,8 @@ from app.services.vocab_service import load_frequency_map, filter_by_priority_mo
 from app.api.routes.netflix import load_cached_netflix_subtitles
 from app.api.routes.user_vocab import get_user_priority_mode, get_user_vocabulary_words
 from app.api.routes.flashcards import iter_flashcard_data
+from app.api.routes.chat import _wrap_pcm_as_wav
+from app.services.gemini_chat_service import synthesize_tts
 
 router = APIRouter()
 
@@ -869,6 +871,35 @@ _LIVE_MODEL = "gemini-2.5-flash-native-audio-latest"
 _LIVE_VOICE = "Aoede"
 
 _live_client: Optional[genai.Client] = None
+
+
+@router.get("/turn/{turn_id}/audio")
+def get_turn_audio(
+    turn_id: int,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user_optional),
+):
+    """Re-synthesize an assistant turn's text with the same Gemini voice used
+    in the live conversation (_LIVE_VOICE), so "Listen" plays back in the
+    voice the tutor actually spoke in rather than a mismatched browser voice."""
+    turn = db.query(m.CV2Turn).filter(m.CV2Turn.id == turn_id).first()
+    if not turn:
+        raise HTTPException(status_code=404, detail="Turn not found")
+    if turn.role != "assistant" or not turn.text:
+        raise HTTPException(status_code=400, detail="Only assistant turns have audio")
+
+    _load_owned_session(db, turn.session_id, current_user)  # 404s if not owned
+
+    try:
+        audio_bytes = synthesize_tts(turn.text, voice_name=_LIVE_VOICE)
+    except Exception as e:
+        print(f"[converse2] TTS failed: {e}")
+        raise HTTPException(status_code=500, detail="TTS generation failed")
+
+    if not audio_bytes:
+        raise HTTPException(status_code=500, detail="TTS returned no audio")
+
+    return Response(content=_wrap_pcm_as_wav(audio_bytes), media_type="audio/wav")
 
 
 def _get_live_client() -> genai.Client:
