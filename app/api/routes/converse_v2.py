@@ -958,6 +958,38 @@ def suggest(
     return svc.generate_suggestions(profile, due_words, _history(db, session_id), req.language)
 
 
+@router.post("/session/{session_id}/suggest/stream")
+def suggest_stream(
+    session_id: int,
+    req: LangBody,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user_optional),
+):
+    """Stream learner reply suggestions as each complete JSONL row arrives."""
+    _ensure_tables()
+    sess = _load_owned_session(db, session_id, current_user)
+    profile = {"level": sess.level, "reason": sess.reason, "english_support": sess.english_support}
+    due_words = [w["lemma"] for w in json.loads(sess.due_words_json or "[]")]
+    history = _history(db, session_id)
+
+    def event_stream():
+        suggestions: list[dict] = []
+        try:
+            for suggestion in svc.generate_suggestions_stream(profile, due_words, history, req.language):
+                suggestions.append(suggestion)
+                yield f"data: {json.dumps({'type': 'suggestion', 'suggestion': suggestion})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'suggested_replies': suggestions})}\n\n"
+        except Exception as exc:
+            print(f"[converse2] suggestion stream failed: {exc}")
+            yield f"data: {json.dumps({'type': 'error', 'message': 'Could not prepare suggestions.'})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @router.post("/session/{session_id}/coach")
 def coach(
     session_id: int,

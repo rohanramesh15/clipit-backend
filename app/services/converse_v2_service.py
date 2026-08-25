@@ -443,6 +443,80 @@ def generate_suggestions(profile: dict, due_words: list[str], history: list[dict
     return {"suggested_replies": clean}
 
 
+def generate_suggestions_stream(profile: dict, due_words: list[str], history: list[dict], language: str = "ko"):
+    """Yield suggested replies as the model completes each JSONL row.
+
+    A normal JSON array cannot be safely rendered until its closing bracket is
+    received. JSON Lines lets the client reveal one complete learner reply at a
+    time while retaining the target-language text and its English support.
+    """
+    name = _lang(language)["name"]
+    system = _persona(profile, due_words, language)
+    convo = "\n".join(f"{h.get('role')}: {h.get('text')}" for h in history[-6:])
+    prompt = (
+        f"Based on the conversation so far, suggest exactly 3 short, natural things the LEARNER could say "
+        f"next in {name}, at their level. Phrase them as things the learner would say in first person, "
+        "never questions back to themselves.\n\n"
+        f"Conversation so far:\n{convo}\n\n"
+        "Return EXACTLY three JSON Lines, one object per line, and no markdown or commentary. "
+        'Each line must be: {"es":"<phrase in target language>","en":"<its English meaning>"}'
+    )
+    config = types.GenerateContentConfig(
+        system_instruction=system,
+        safety_settings=_safety(),
+        temperature=0.7,
+        max_output_tokens=360,
+    )
+
+    buffer = ""
+    raw = ""
+    emitted: list[dict] = []
+
+    def parse_reply(line: str) -> dict | None:
+        cleaned = line.strip()
+        if cleaned.startswith("```"):
+            return None
+        try:
+            value = json.loads(cleaned)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(value, dict) or not isinstance(value.get("es"), str) or not value["es"].strip():
+            return None
+        return {"es": value["es"].strip(), "en": str(value.get("en") or "").strip()}
+
+    for chunk in _get_client().models.generate_content_stream(model=_MODEL, contents=prompt, config=config):
+        piece = getattr(chunk, "text", None) or ""
+        if not piece:
+            continue
+        raw += piece
+        buffer += piece
+        while "\n" in buffer:
+            line, buffer = buffer.split("\n", 1)
+            suggestion = parse_reply(line)
+            if suggestion and len(emitted) < 3:
+                emitted.append(suggestion)
+                yield suggestion
+
+    final_suggestion = parse_reply(buffer)
+    if final_suggestion and len(emitted) < 3:
+        emitted.append(final_suggestion)
+        yield final_suggestion
+
+    # Providers occasionally ignore JSONL and send a complete JSON payload.
+    # Retain a useful final response in that case instead of showing nothing.
+    if not emitted:
+        try:
+            payload = json.loads(raw.replace("```json", "").replace("```", "").strip())
+            values = payload.get("suggested_replies", []) if isinstance(payload, dict) else payload
+            for value in values[:3] if isinstance(values, list) else []:
+                if isinstance(value, dict) and isinstance(value.get("es"), str) and value["es"].strip():
+                    suggestion = {"es": value["es"].strip(), "en": str(value.get("en") or "").strip()}
+                    emitted.append(suggestion)
+                    yield suggestion
+        except json.JSONDecodeError:
+            pass
+
+
 def coach_english(profile: dict, due_words: list[str], history: list[dict], english: str, language: str = "ko") -> dict:
     """The learner replied in English instead of the target language. Return the
     corrected target-language message, a friendly explanation, and a deeper
