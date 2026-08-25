@@ -21,6 +21,7 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -705,6 +706,68 @@ def chat_turn(
     db.refresh(assistant_turn)
 
     return {"turn_id": assistant_turn.id, **result}
+
+
+@router.post("/session/{session_id}/turn/stream")
+def chat_turn_stream(
+    session_id: int,
+    req: TurnRequest,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user_optional),
+):
+    """Same as chat_turn, but streams the reply as Server-Sent Events instead
+    of waiting for the full response:
+      data: {"type": "chunk", "text": "..."}   (repeated as text arrives)
+      data: {"type": "done", "turn_id": ..., "reply": ..., ...}  (final, full result)
+    """
+    _ensure_tables()
+    sess = _load_owned_session(db, session_id, current_user)
+    profile = {"level": sess.level, "reason": sess.reason, "english_support": sess.english_support}
+    due_words = [w["lemma"] for w in json.loads(sess.due_words_json or "[]")]
+    history = _history(db, session_id)
+
+    user_turn = m.CV2Turn(session_id=session_id, idx=_next_idx(db, session_id), role="user", text=req.text)
+    db.add(user_turn)
+    db.commit()
+
+    def event_stream():
+        result: Optional[dict] = None
+        try:
+            for kind, payload in svc.generate_turn_stream(profile, due_words, history, req.text, req.language):
+                if kind == "chunk":
+                    yield f"data: {json.dumps({'type': 'chunk', 'text': payload})}\n\n"
+                else:
+                    result = payload
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            return
+
+        if result is None:
+            yield f"data: {json.dumps({'type': 'error', 'message': 'No reply generated'})}\n\n"
+            return
+
+        assistant_turn = m.CV2Turn(
+            session_id=session_id,
+            idx=_next_idx(db, session_id),
+            role="assistant",
+            text=result["reply"],
+            meta_json=json.dumps(
+                {
+                    "reply_translation": result["reply_translation"],
+                    "correction": result["correction"],
+                    "used_target_words": result["used_target_words"],
+                    "suggested_replies": result["suggested_replies"],
+                    "detected_language": result["detected_language"],
+                }
+            ),
+        )
+        db.add(assistant_turn)
+        db.commit()
+        db.refresh(assistant_turn)
+
+        yield f"data: {json.dumps({'type': 'done', 'turn_id': assistant_turn.id, **result})}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @router.post("/session/{session_id}/regenerate")

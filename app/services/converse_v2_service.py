@@ -281,6 +281,91 @@ def generate_turn(profile: dict, due_words: list[str], history: list[dict], user
     }
 
 
+def _turn_metadata_json_spec(reply: str, language: str = "ko") -> str:
+    """Same ladder metadata as _turn_json_spec, but for a reply that has
+    already been decided (streamed separately) rather than asking the model
+    to invent one — used by generate_turn_stream."""
+    name = _lang(language)["name"]
+    return f"""Your reply to the learner has already been decided:
+"{reply}"
+
+Return ONLY a JSON object (no markdown fences) with this exact shape, describing that reply and the learner's last message:
+{{
+  "reply_translation": "a faithful English translation of the reply above",
+  "detected_language": "target" | "en" | "mixed",
+  "correction": null OR {{
+      "correct": "the corrected {name} version of what the learner tried to say",
+      "why_en": "one short English sentence explaining the fix (keep it to one line)"
+  }},
+  "used_target_words": ["any of the learner's due words that appeared in the reply above, lemma form"],
+  "suggested_replies": [
+      {{"es": "a natural reply the learner could send, at their level", "en": "its English meaning"}},
+      {{"es": "a different option", "en": "its English meaning"}}
+  ]
+}}
+Rules for the fields:
+- "correction" is null unless the learner actually made a meaningful error worth modeling. Minor typos do not count.
+- Provide 2 or 3 "suggested_replies", always at or slightly below the learner's level, phrased as THINGS THE LEARNER WOULD SAY (first person), never questions back to themselves.
+- "used_target_words" lists only words that truly appear in the reply above."""
+
+
+def generate_turn_stream(profile: dict, due_words: list[str], history: list[dict], user_text: str, language: str = "ko"):
+    """Streaming counterpart to generate_turn.
+
+    Yields ("chunk", text) for each piece of the reply as Gemini generates
+    it (plain text, no JSON wrapper - the model can't stream partial JSON
+    usefully), then a final ("done", result_dict) once the full reply is
+    known and the ladder metadata (translation/correction/suggestions) has
+    been computed for it in a second, non-streamed call.
+    """
+    name = _lang(language)["name"]
+    persona = _persona(profile, due_words, language)
+    reply_system = (
+        persona
+        + f"\n\nReply naturally and conversationally in {name}, in 1-3 sentences, ending by "
+        "inviting the learner to keep talking. Return PLAIN TEXT ONLY - no JSON, no markdown, "
+        "no quotes around the reply, no extra commentary before or after it."
+    )
+    contents = _history_contents(history)
+    contents.append(types.Content(role="user", parts=[types.Part.from_text(text=user_text)]))
+
+    client = _get_client()
+    config = types.GenerateContentConfig(
+        system_instruction=reply_system,
+        safety_settings=_safety(),
+        temperature=0.7,
+        max_output_tokens=300,
+    )
+    full_text = ""
+    for chunk in client.models.generate_content_stream(model=_MODEL, contents=contents, config=config):
+        piece = getattr(chunk, "text", None) or ""
+        if piece:
+            full_text += piece
+            yield ("chunk", piece)
+
+    reply = full_text.strip() or _lang(language)["fallback"]
+    meta_system = persona + "\n\n" + _turn_metadata_json_spec(reply, language)
+    data = _generate_json(meta_system, contents, temperature=0.5)
+
+    correction = data.get("correction")
+    if correction and not isinstance(correction, dict):
+        correction = None
+    suggestions = data.get("suggested_replies") or []
+    clean_sugs = []
+    for s in suggestions[:3]:
+        if isinstance(s, dict) and s.get("es"):
+            clean_sugs.append({"es": s.get("es", ""), "en": s.get("en", "")})
+
+    yield ("done", {
+        "reply": reply,
+        "reply_translation": data.get("reply_translation") or "",
+        "detected_language": data.get("detected_language") or "target",
+        "correction": correction,
+        "used_target_words": [w for w in (data.get("used_target_words") or []) if isinstance(w, str)],
+        "suggested_replies": clean_sugs,
+    })
+
+
 def generate_suggestions(profile: dict, due_words: list[str], history: list[dict], language: str = "ko") -> dict:
     """Suggest a few things the LEARNER could say next, in the target language."""
     name = _lang(language)["name"]
