@@ -20,6 +20,11 @@ from app.services.video_store import (
 router = APIRouter()
 
 
+# Home is a short practice queue.  A video can contain thousands of distinct
+# caption tokens, but only a focused selection should be offered for study.
+HOME_QUEUE_WORDS_PER_VIDEO = 20
+
+
 class TrackVideoRequest(BaseModel):
     video_id: str
     title: str = "Unknown"
@@ -118,9 +123,9 @@ async def get_home_queue(
                 current_user=current_user,
                 upgrade_cards=False,
                 # Keep the same focused candidate set used by practice: the
-                # user's priority mode, common-word filtering, and 20 words
-                # per watched source all apply inside get_vocabulary.
-                limit=20,
+                # user's priority mode, common-word filtering, and a bounded
+                # number of words per watched source all apply here.
+                limit=HOME_QUEUE_WORDS_PER_VIDEO,
             )
             vocabulary_items = vocabulary.get("vocabulary", [])
             words = [item["word"] for item in vocabulary_items]
@@ -151,6 +156,7 @@ async def get_home_queue(
     return {
         "lang": lang,
         "cards": list(card_by_key.values()),
+        "candidate_limit_per_video": HOME_QUEUE_WORDS_PER_VIDEO,
         "partial": False,
         "source_video_count": source_video_count,
     }
