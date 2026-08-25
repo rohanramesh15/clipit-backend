@@ -1323,45 +1323,55 @@ async def voice_ws(
                                 )
 
             async def pump_out():
+                """Gemini audio + transcripts → browser for the entire call.
+
+                ``live.receive()`` is scoped to one completed Gemini turn. If
+                this coroutine returned after the first response, ``pump_in``
+                would keep sending microphone PCM to Gemini while nothing was
+                receiving the next response. The browser would consequently
+                still show its active stop/listening control even though later
+                speech could no longer produce a reply.
+                """
                 nonlocal user_buf, asst_buf
-                async for response in live.receive():
-                    audio = getattr(response, "data", None)
-                    if audio:
-                        await websocket.send_bytes(audio)
+                while True:
+                    async for response in live.receive():
+                        audio = getattr(response, "data", None)
+                        if audio:
+                            await websocket.send_bytes(audio)
 
-                    sc = getattr(response, "server_content", None)
-                    if not sc:
-                        continue
+                        sc = getattr(response, "server_content", None)
+                        if not sc:
+                            continue
 
-                    inp_t = getattr(sc, "input_transcription", None)
-                    if inp_t and getattr(inp_t, "text", None):
-                        user_buf.append(inp_t.text)
-                        await websocket.send_json({"event": "user_transcript", "text": inp_t.text})
+                        inp_t = getattr(sc, "input_transcription", None)
+                        if inp_t and getattr(inp_t, "text", None):
+                            user_buf.append(inp_t.text)
+                            await websocket.send_json({"event": "user_transcript", "text": inp_t.text})
 
-                    out_t = getattr(sc, "output_transcription", None)
-                    if out_t and getattr(out_t, "text", None):
-                        asst_buf.append(out_t.text)
-                        await websocket.send_json({"event": "assistant_transcript", "text": out_t.text})
+                        out_t = getattr(sc, "output_transcription", None)
+                        if out_t and getattr(out_t, "text", None):
+                            asst_buf.append(out_t.text)
+                            await websocket.send_json({"event": "assistant_transcript", "text": out_t.text})
 
-                    if getattr(sc, "interrupted", False):
-                        # Drop the assistant's partial turn — the learner barged in.
-                        asst_buf = []
-                        await websocket.send_json({"event": "interrupted"})
+                        if getattr(sc, "interrupted", False):
+                            # Drop the assistant's partial turn — the learner barged in.
+                            asst_buf = []
+                            await websocket.send_json({"event": "interrupted"})
 
-                    if getattr(sc, "turn_complete", False):
-                        user_text = "".join(user_buf).strip()
-                        asst_text = "".join(asst_buf).strip()
-                        user_buf = []
-                        asst_buf = []
-                        user_id = _persist_turn("user", user_text) if user_text else None
-                        asst_id = _persist_turn("assistant", asst_text) if asst_text else None
-                        await websocket.send_json({
-                            "event": "turn_complete",
-                            "user_turn_id": user_id,
-                            "assistant_turn_id": asst_id,
-                            "user_text": user_text,
-                            "assistant_text": asst_text,
-                        })
+                        if getattr(sc, "turn_complete", False):
+                            user_text = "".join(user_buf).strip()
+                            asst_text = "".join(asst_buf).strip()
+                            user_buf = []
+                            asst_buf = []
+                            user_id = _persist_turn("user", user_text) if user_text else None
+                            asst_id = _persist_turn("assistant", asst_text) if asst_text else None
+                            await websocket.send_json({
+                                "event": "turn_complete",
+                                "user_turn_id": user_id,
+                                "assistant_turn_id": asst_id,
+                                "user_text": user_text,
+                                "assistant_text": asst_text,
+                            })
 
             await asyncio.gather(pump_in(), pump_out(), return_exceptions=True)
 
