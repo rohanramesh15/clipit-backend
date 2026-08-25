@@ -502,19 +502,30 @@ def generate_suggestions_stream(profile: dict, due_words: list[str], history: li
         emitted.append(final_suggestion)
         yield final_suggestion
 
-    # Providers occasionally ignore JSONL and send a complete JSON payload.
-    # Retain a useful final response in that case instead of showing nothing.
-    if not emitted:
-        try:
-            payload = json.loads(raw.replace("```json", "").replace("```", "").strip())
-            values = payload.get("suggested_replies", []) if isinstance(payload, dict) else payload
-            for value in values[:3] if isinstance(values, list) else []:
-                if isinstance(value, dict) and isinstance(value.get("es"), str) and value["es"].strip():
-                    suggestion = {"es": value["es"].strip(), "en": str(value.get("en") or "").strip()}
-                    emitted.append(suggestion)
-                    yield suggestion
-        except json.JSONDecodeError:
-            pass
+    # Gemini can legally format a JSON object over several lines even when
+    # asked for JSONL. Recover every complete object from the whole response,
+    # including objects nested in an array, so one formatting choice cannot
+    # leave the learner with an empty suggestion panel.
+    if len(emitted) < 3:
+        cleaned_raw = raw.replace("```json", "").replace("```", "")
+        decoder = json.JSONDecoder()
+        cursor = 0
+        while cursor < len(cleaned_raw) and len(emitted) < 3:
+            start = cleaned_raw.find("{", cursor)
+            if start < 0:
+                break
+            try:
+                value, consumed = decoder.raw_decode(cleaned_raw[start:])
+            except json.JSONDecodeError:
+                cursor = start + 1
+                continue
+            cursor = start + consumed
+            if not isinstance(value, dict) or not isinstance(value.get("es"), str) or not value["es"].strip():
+                continue
+            suggestion = {"es": value["es"].strip(), "en": str(value.get("en") or "").strip()}
+            if suggestion not in emitted:
+                emitted.append(suggestion)
+                yield suggestion
 
 
 def coach_english(profile: dict, due_words: list[str], history: list[dict], english: str, language: str = "ko") -> dict:
