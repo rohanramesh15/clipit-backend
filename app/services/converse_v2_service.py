@@ -154,6 +154,7 @@ def _turn_json_spec(language: str = "ko") -> str:
 {{
   "reply": "your spoken reply in {name} (1-3 sentences, ends by inviting them to keep talking)",
   "reply_translation": "a faithful English translation of reply",
+  "romanized": "the reply above transliterated into the Latin/English alphabet, showing pronunciation",
   "detected_language": "target" | "en" | "mixed",
   "correction": null OR {{
       "correct": "the corrected {name} version of what the learner tried to say",
@@ -168,7 +169,8 @@ def _turn_json_spec(language: str = "ko") -> str:
 Rules for the fields:
 - "correction" is null unless the learner actually made a meaningful error worth modeling. Minor typos do not count.
 - Provide 2 or 3 "suggested_replies", always at or slightly below the learner's level, phrased as THINGS THE LEARNER WOULD SAY (first person), never questions back to themselves.
-- "used_target_words" lists only words that truly appear in your reply."""
+- "used_target_words" lists only words that truly appear in your reply.
+- "romanized" is empty string "" if {name} is already written in the Latin alphabet."""
 
 
 def _generate_json(system_instruction: str, contents, *, temperature: float = 0.7) -> dict:
@@ -255,6 +257,55 @@ def generate_opening(profile: dict, due_words: list[str], seed: dict, language: 
     }
 
 
+def generate_opening_stream(profile: dict, due_words: list[str], seed: dict, language: str = "ko"):
+    """Stream an opening reply, then provide its translation in the final event."""
+    name = _lang(language)["name"]
+    seed_type = (seed or {}).get("type", "due_words")
+    if seed_type == "video":
+        topic = (
+            f"The learner just watched a {name}-language clip titled "
+            f"\"{seed.get('title', '')}\". Open by reacting to it and asking what they thought, "
+            f"in simple {name}."
+        )
+    elif seed_type == "topic":
+        topic = (
+            f"The learner chose to talk about: \"{seed.get('title', '')}\". "
+            f"Open with a warm {name} greeting and an easy, specific question that gets them talking."
+        )
+    elif seed_type == "free":
+        topic = f"Open with a warm, simple {name} greeting and ask an easy opening question about their day."
+    else:
+        topic = f"Open with a warm {name} greeting and an easy question that invites the learner to use their due words."
+
+    persona = _persona(profile, due_words, language)
+    config = types.GenerateContentConfig(
+        system_instruction=(
+            persona + f"\n\nStart the conversation. {topic} "
+            f"Write 1-3 warm, simple sentences in {name}. Return PLAIN TEXT ONLY."
+        ),
+        safety_settings=_safety(),
+        temperature=0.8,
+        max_output_tokens=200,
+    )
+    full_text = ""
+    for chunk in _get_client().models.generate_content_stream(model=_MODEL, contents="Start the conversation.", config=config):
+        piece = getattr(chunk, "text", None) or ""
+        if piece:
+            full_text += piece
+            yield ("chunk", piece)
+
+    lang = _lang(language)
+    reply = full_text.strip() or lang["fallback"]
+    if not full_text.strip():
+        yield ("chunk", reply)
+    translation = _generate_json(
+        f"Translate the following {name} message naturally into English. Return ONLY JSON with key reply_translation.",
+        f"Message: {reply}",
+        temperature=0.2,
+    ).get("reply_translation") or lang["fallback_en"]
+    yield ("done", {"reply": reply, "reply_translation": translation})
+
+
 def generate_turn(profile: dict, due_words: list[str], history: list[dict], user_text: str, language: str = "ko") -> dict:
     """Main chat turn. Returns reply + ladder metadata."""
     system = _persona(profile, due_words, language) + "\n\n" + _turn_json_spec(language)
@@ -274,6 +325,7 @@ def generate_turn(profile: dict, due_words: list[str], history: list[dict], user
     return {
         "reply": reply,
         "reply_translation": data.get("reply_translation") or "",
+        "romanized": data.get("romanized") or "",
         "detected_language": data.get("detected_language") or "es",
         "correction": correction,
         "used_target_words": [w for w in (data.get("used_target_words") or []) if isinstance(w, str)],
@@ -292,6 +344,7 @@ def _turn_metadata_json_spec(reply: str, language: str = "ko") -> str:
 Return ONLY a JSON object (no markdown fences) with this exact shape, describing that reply and the learner's last message:
 {{
   "reply_translation": "a faithful English translation of the reply above",
+  "romanized": "the reply above transliterated into the Latin/English alphabet, showing pronunciation",
   "detected_language": "target" | "en" | "mixed",
   "correction": null OR {{
       "correct": "the corrected {name} version of what the learner tried to say",
@@ -306,7 +359,8 @@ Return ONLY a JSON object (no markdown fences) with this exact shape, describing
 Rules for the fields:
 - "correction" is null unless the learner actually made a meaningful error worth modeling. Minor typos do not count.
 - Provide 2 or 3 "suggested_replies", always at or slightly below the learner's level, phrased as THINGS THE LEARNER WOULD SAY (first person), never questions back to themselves.
-- "used_target_words" lists only words that truly appear in the reply above."""
+- "used_target_words" lists only words that truly appear in the reply above.
+- "romanized" is empty string "" if {name} is already written in the Latin alphabet."""
 
 
 def generate_turn_stream(profile: dict, due_words: list[str], history: list[dict], user_text: str, language: str = "ko"):
@@ -359,6 +413,7 @@ def generate_turn_stream(profile: dict, due_words: list[str], history: list[dict
     yield ("done", {
         "reply": reply,
         "reply_translation": data.get("reply_translation") or "",
+        "romanized": data.get("romanized") or "",
         "detected_language": data.get("detected_language") or "target",
         "correction": correction,
         "used_target_words": [w for w in (data.get("used_target_words") or []) if isinstance(w, str)],

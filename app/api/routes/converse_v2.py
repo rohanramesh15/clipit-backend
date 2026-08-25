@@ -350,6 +350,9 @@ class SessionRequest(BaseModel):
     # When provided these become the session's target words (woven + tracked),
     # replacing the themed mock list. lemma = dictionary form, gloss = English.
     seed_words: list[SeedWord] | None = None
+    # The web chat creates the session immediately, then streams its opening
+    # reply through the dedicated SSE endpoint below.
+    stream_opening: bool = False
 
 
 class TurnRequest(BaseModel):
@@ -519,6 +522,15 @@ def create_session(
     db.commit()
     db.refresh(sess)
 
+    response = {
+        "session_id": sess.id,
+        "level": profile["level"],
+        "due_words": due_words,
+        "source_videos": source_videos,
+    }
+    if req.stream_opening:
+        return response
+
     lemmas = [w["lemma"] for w in due_words]
     opening = svc.generate_opening(profile, lemmas, seed, req.language)
 
@@ -534,16 +546,77 @@ def create_session(
     db.refresh(turn)
 
     return {
-        "session_id": sess.id,
-        "level": profile["level"],
-        "due_words": due_words,
-        "source_videos": source_videos,
+        **response,
         "opening": {
             "turn_id": turn.id,
             "reply": opening["reply"],
             "reply_translation": opening["reply_translation"],
         },
     }
+
+
+@router.post("/session/{session_id}/opening/stream")
+def stream_opening(
+    session_id: int,
+    body: LangBody,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user_optional),
+):
+    """Generate and persist a new conversation's greeting as SSE chunks."""
+    _ensure_tables()
+    sess = _load_owned_session(db, session_id, current_user)
+
+    existing_opening = (
+        db.query(m.CV2Turn)
+        .filter(m.CV2Turn.session_id == sess.id, m.CV2Turn.idx == 0, m.CV2Turn.role == "assistant")
+        .first()
+    )
+    if existing_opening:
+        raise HTTPException(status_code=409, detail="This session already has an opening message")
+
+    profile = {
+        "level": sess.level,
+        "reason": sess.reason,
+        "english_support": sess.english_support,
+    }
+    due_words = [word.get("lemma", "") for word in json.loads(sess.due_words_json or "[]")]
+    seed = {"type": sess.seed_type}
+    if sess.seed_label:
+        seed["title"] = sess.seed_label
+
+    def event_stream():
+        try:
+            result = None
+            for kind, payload in svc.generate_opening_stream(profile, due_words, seed, body.language):
+                if kind == "chunk":
+                    yield f"data: {json.dumps({'type': 'chunk', 'text': payload})}\n\n"
+                else:
+                    result = payload
+        except Exception as error:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(error)})}\n\n"
+            return
+
+        if result is None:
+            yield f"data: {json.dumps({'type': 'error', 'message': 'No opening message generated'})}\n\n"
+            return
+
+        turn = m.CV2Turn(
+            session_id=sess.id,
+            idx=0,
+            role="assistant",
+            text=result["reply"],
+            meta_json=json.dumps({"reply_translation": result["reply_translation"]}),
+        )
+        db.add(turn)
+        db.commit()
+        db.refresh(turn)
+        yield f"data: {json.dumps({'type': 'done', 'turn_id': turn.id, **result})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 def _load_session(db: Session, session_id: int) -> m.CV2Session:
