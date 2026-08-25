@@ -22,7 +22,7 @@ import traceback
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -929,6 +929,7 @@ def chat_turn_stream(
 def regenerate(
     session_id: int,
     req: LangBody,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: Optional[User] = Depends(get_current_user_optional),
 ):
@@ -965,6 +966,10 @@ def regenerate(
     )
     db.commit()
     db.refresh(last_asst)
+    # Kick off TTS for the rephrase's replacement audio now, in the
+    # background, instead of waiting for the frontend's separate
+    # GET /turn/{id}/audio to trigger synthesis from scratch a moment later.
+    background_tasks.add_task(_prewarm_turn_audio, last_asst.id, result["reply"], _resolve_voice(req.voice))
     return {"turn_id": last_asst.id, **result}
 
 
@@ -1128,6 +1133,29 @@ _LIVE_VOICE = "Aoede"
 _live_client: Optional[genai.Client] = None
 
 
+# Small in-process cache so audio pre-warmed ahead of time (see
+# _prewarm_turn_audio, used by /regenerate) doesn't get synthesized a second
+# time moments later when the frontend makes its follow-up request for it.
+_turn_audio_cache: dict[tuple[int, str], bytes] = {}
+_TURN_AUDIO_CACHE_MAX = 64
+
+
+def _prewarm_turn_audio(turn_id: int, text: str, voice: str) -> None:
+    """Synthesize a turn's audio in the background right after its text is
+    ready (e.g. from /regenerate), instead of waiting for the frontend's
+    separate GET /turn/{id}/audio to trigger synthesis from scratch."""
+    try:
+        audio_bytes = synthesize_tts(text, voice_name=voice)
+    except Exception as e:
+        print(f"[converse2] TTS pre-warm failed: {e}")
+        return
+    if not audio_bytes:
+        return
+    if len(_turn_audio_cache) >= _TURN_AUDIO_CACHE_MAX:
+        _turn_audio_cache.pop(next(iter(_turn_audio_cache)))
+    _turn_audio_cache[(turn_id, voice)] = _wrap_pcm_as_wav(audio_bytes)
+
+
 @router.get("/turn/{turn_id}/audio")
 def get_turn_audio(
     turn_id: int,
@@ -1146,8 +1174,13 @@ def get_turn_audio(
 
     _load_owned_session(db, turn.session_id, current_user)  # 404s if not owned
 
+    resolved_voice = _resolve_voice(voice)
+    cached = _turn_audio_cache.pop((turn_id, resolved_voice), None)
+    if cached is not None:
+        return Response(content=cached, media_type="audio/wav")
+
     try:
-        audio_bytes = synthesize_tts(turn.text, voice_name=_resolve_voice(voice))
+        audio_bytes = synthesize_tts(turn.text, voice_name=resolved_voice)
     except Exception as e:
         print(f"[converse2] TTS failed: {e}")
         raise HTTPException(status_code=500, detail="TTS generation failed")
