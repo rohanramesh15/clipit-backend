@@ -527,6 +527,16 @@ def generate_suggestions_stream(profile: dict, due_words: list[str], history: li
                 emitted.append(suggestion)
                 yield suggestion
 
+    # The streaming model can occasionally return thought-only parts with no
+    # usable JSON text. Keep the streamed route dependable by falling back to
+    # the proven structured generator rather than ending an otherwise-successful
+    # SSE response with zero choices.
+    if not emitted:
+        fallback = generate_suggestions(profile, due_words, history, language)
+        for suggestion in fallback.get("suggested_replies", [])[:3]:
+            if isinstance(suggestion, dict) and suggestion.get("es"):
+                yield suggestion
+
 
 def coach_english(profile: dict, due_words: list[str], history: list[dict], english: str, language: str = "ko") -> dict:
     """The learner replied in English instead of the target language. Return the
