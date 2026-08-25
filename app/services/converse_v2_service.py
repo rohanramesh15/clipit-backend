@@ -15,7 +15,10 @@ suggested replies) in a single round-trip.
 from __future__ import annotations
 
 import json
+import logging
+import random
 import re
+import time
 
 from google import genai
 from google.genai import types
@@ -23,6 +26,9 @@ from google.genai import types
 from app.core.config import settings
 
 _MODEL = "gemini-2.5-flash"
+_SUGGESTION_MAX_ATTEMPTS = 3
+
+logger = logging.getLogger(__name__)
 
 _client: genai.Client | None = None
 
@@ -443,6 +449,86 @@ def generate_suggestions(profile: dict, due_words: list[str], history: list[dict
     return {"suggested_replies": clean}
 
 
+def _is_transient_model_error(exc: Exception) -> bool:
+    """Return whether another Gemini attempt is likely to succeed.
+
+    google-genai exposes slightly different exception shapes across transport
+    versions, so inspect both its status attributes and its stable message.
+    Authentication and invalid-request errors deliberately do not retry.
+    """
+    status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+    if callable(status):
+        try:
+            status = status()
+        except Exception:
+            status = None
+    if status in {408, 429, 500, 502, 503, 504}:
+        return True
+
+    message = str(exc).lower()
+    return any(marker in message for marker in (
+        "429", "resource exhausted", "rate limit", "deadline exceeded",
+        "timed out", "timeout", "unavailable", "connection reset",
+        "internal error", "503", "502", "504",
+    ))
+
+
+def _suggestion_backoff(attempt: int) -> None:
+    """Pause briefly before a transient retry without synchronizing callers."""
+    delay = min(0.4 * (2 ** attempt), 2.0) + random.uniform(0, 0.2)
+    time.sleep(delay)
+
+
+def _structured_suggestion_fallback(
+    profile: dict,
+    due_words: list[str],
+    history: list[dict],
+    language: str,
+) -> list[dict]:
+    """Use Gemini's JSON-mode endpoint to fill missing stream suggestions.
+
+    JSON mode is less visually immediate than the JSONL stream but much more
+    tolerant of streamed-formatting failures. It also gets retries for
+    temporary provider/network failures.
+    """
+    for attempt in range(_SUGGESTION_MAX_ATTEMPTS):
+        try:
+            return generate_suggestions(profile, due_words, history, language).get("suggested_replies", [])
+        except Exception as exc:
+            retrying = _is_transient_model_error(exc) and attempt < _SUGGESTION_MAX_ATTEMPTS - 1
+            logger.warning(
+                "Structured AI-chat suggestion fallback failed (attempt %s/%s, retrying=%s): %s",
+                attempt + 1,
+                _SUGGESTION_MAX_ATTEMPTS,
+                retrying,
+                exc,
+            )
+            if not retrying:
+                return []
+            _suggestion_backoff(attempt)
+    return []
+
+
+def _emergency_suggestions(language: str) -> list[dict]:
+    """Keep a conversation moving during a complete provider outage.
+
+    These are intentionally simple, broadly appropriate first-person replies.
+    They are used only after the streamed request and the structured retry path
+    both fail, and are logged by the caller so outages remain visible.
+    """
+    if language == "uk":
+        return [
+            {"es": "Так, мені це подобається.", "en": "Yes, I like it."},
+            {"es": "Я теж так думаю.", "en": "I think so too."},
+            {"es": "Я хочу дізнатися більше.", "en": "I want to learn more."},
+        ]
+    return [
+        {"es": "네, 저는 좋아요.", "en": "Yes, I like it."},
+        {"es": "저도 그렇게 생각해요.", "en": "I think so too."},
+        {"es": "저는 더 알고 싶어요.", "en": "I want to know more."},
+    ]
+
+
 def generate_suggestions_stream(profile: dict, due_words: list[str], history: list[dict], language: str = "ko"):
     """Yield model deltas plus suggested replies as each JSONL row completes.
 
@@ -468,9 +554,8 @@ def generate_suggestions_stream(profile: dict, due_words: list[str], history: li
         max_output_tokens=360,
     )
 
-    buffer = ""
-    raw = ""
     emitted: list[dict] = []
+    emitted_keys: set[tuple[str, str]] = set()
 
     def parse_reply(line: str) -> dict | None:
         cleaned = line.strip()
@@ -484,61 +569,97 @@ def generate_suggestions_stream(profile: dict, due_words: list[str], history: li
             return None
         return {"es": value["es"].strip(), "en": str(value.get("en") or "").strip()}
 
-    for chunk in _get_client().models.generate_content_stream(model=_MODEL, contents=prompt, config=config):
-        piece = getattr(chunk, "text", None) or ""
-        if not piece:
-            continue
-        # Forward raw model deltas immediately. The UI uses the unfinished
-        # current JSONL row to reveal the target-language suggestion as it is
-        # generated, instead of showing an indeterminate loading animation.
-        yield {"type": "delta", "text": piece}
-        raw += piece
-        buffer += piece
-        while "\n" in buffer:
-            line, buffer = buffer.split("\n", 1)
-            suggestion = parse_reply(line)
-            if suggestion and len(emitted) < 3:
-                emitted.append(suggestion)
+    def add_suggestion(suggestion: dict | None) -> dict | None:
+        if not suggestion or len(emitted) >= 3:
+            return None
+        text = str(suggestion.get("es") or "").strip()
+        if not text:
+            return None
+        clean = {"es": text, "en": str(suggestion.get("en") or "").strip()}
+        key = (clean["es"], clean["en"])
+        if key in emitted_keys:
+            return None
+        emitted_keys.add(key)
+        emitted.append(clean)
+        return clean
+
+    # A broken connection, rate limit, or temporary provider error used to
+    # terminate the SSE response immediately. Retry the streamed request first
+    # so normal progressive rendering is preserved when the next attempt works.
+    for attempt in range(_SUGGESTION_MAX_ATTEMPTS):
+        buffer = ""
+        raw = ""
+        try:
+            for chunk in _get_client().models.generate_content_stream(model=_MODEL, contents=prompt, config=config):
+                piece = getattr(chunk, "text", None) or ""
+                if not piece:
+                    continue
+                # Forward raw model deltas immediately. The UI uses the unfinished
+                # current JSONL row to reveal the target-language suggestion as it is
+                # generated, instead of showing an indeterminate loading animation.
+                yield {"type": "delta", "text": piece}
+                raw += piece
+                buffer += piece
+                while "\n" in buffer:
+                    line, buffer = buffer.split("\n", 1)
+                    suggestion = add_suggestion(parse_reply(line))
+                    if suggestion:
+                        yield {"type": "suggestion", "suggestion": suggestion}
+
+            suggestion = add_suggestion(parse_reply(buffer))
+            if suggestion:
                 yield {"type": "suggestion", "suggestion": suggestion}
 
-    final_suggestion = parse_reply(buffer)
-    if final_suggestion and len(emitted) < 3:
-        emitted.append(final_suggestion)
-        yield {"type": "suggestion", "suggestion": final_suggestion}
-
-    # Gemini can legally format a JSON object over several lines even when
-    # asked for JSONL. Recover every complete object from the whole response,
-    # including objects nested in an array, so one formatting choice cannot
-    # leave the learner with an empty suggestion panel.
-    if len(emitted) < 3:
-        cleaned_raw = raw.replace("```json", "").replace("```", "")
-        decoder = json.JSONDecoder()
-        cursor = 0
-        while cursor < len(cleaned_raw) and len(emitted) < 3:
-            start = cleaned_raw.find("{", cursor)
-            if start < 0:
+            # Gemini can legally format a JSON object over several lines even
+            # when asked for JSONL. Recover objects from the complete response.
+            cleaned_raw = raw.replace("```json", "").replace("```", "")
+            decoder = json.JSONDecoder()
+            cursor = 0
+            while cursor < len(cleaned_raw) and len(emitted) < 3:
+                start = cleaned_raw.find("{", cursor)
+                if start < 0:
+                    break
+                try:
+                    value, consumed = decoder.raw_decode(cleaned_raw[start:])
+                except json.JSONDecodeError:
+                    cursor = start + 1
+                    continue
+                cursor = start + consumed
+                suggestion = add_suggestion(value if isinstance(value, dict) else None)
+                if suggestion:
+                    yield {"type": "suggestion", "suggestion": suggestion}
+            break
+        except Exception as exc:
+            retrying = _is_transient_model_error(exc) and attempt < _SUGGESTION_MAX_ATTEMPTS - 1
+            logger.warning(
+                "Streamed AI-chat suggestions failed (attempt %s/%s, retrying=%s): %s",
+                attempt + 1,
+                _SUGGESTION_MAX_ATTEMPTS,
+                retrying,
+                exc,
+            )
+            if not retrying:
                 break
-            try:
-                value, consumed = decoder.raw_decode(cleaned_raw[start:])
-            except json.JSONDecodeError:
-                cursor = start + 1
-                continue
-            cursor = start + consumed
-            if not isinstance(value, dict) or not isinstance(value.get("es"), str) or not value["es"].strip():
-                continue
-            suggestion = {"es": value["es"].strip(), "en": str(value.get("en") or "").strip()}
-            if suggestion not in emitted:
-                emitted.append(suggestion)
+            _suggestion_backoff(attempt)
+
+    # A JSON-mode request is more reliable for recovery. It fills any missing
+    # choices, not only the all-or-nothing empty-stream case.
+    if len(emitted) < 3:
+        for fallback in _structured_suggestion_fallback(profile, due_words, history, language):
+            suggestion = add_suggestion(fallback if isinstance(fallback, dict) else None)
+            if suggestion:
                 yield {"type": "suggestion", "suggestion": suggestion}
 
-    # The streaming model can occasionally return thought-only parts with no
-    # usable JSON text. Keep the streamed route dependable by falling back to
-    # the proven structured generator rather than ending an otherwise-successful
-    # SSE response with zero choices.
-    if not emitted:
-        fallback = generate_suggestions(profile, due_words, history, language)
-        for suggestion in fallback.get("suggested_replies", [])[:3]:
-            if isinstance(suggestion, dict) and suggestion.get("es"):
+    # Preserve a usable three-choice conversation surface even during a
+    # complete Gemini outage or a partial structured response.
+    if len(emitted) < 3:
+        logger.error(
+            "AI-chat suggestions produced %s/3 choices after Gemini recovery paths; using local fallback",
+            len(emitted),
+        )
+        for fallback in _emergency_suggestions(language):
+            suggestion = add_suggestion(fallback)
+            if suggestion:
                 yield {"type": "suggestion", "suggestion": suggestion}
 
 
