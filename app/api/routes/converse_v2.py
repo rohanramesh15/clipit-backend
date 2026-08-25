@@ -15,7 +15,9 @@ Mounted under /api/converse2.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import re
 import traceback
 from datetime import datetime
 from typing import Optional
@@ -56,6 +58,7 @@ router = APIRouter()
 USER_KEY = "prototype"
 MIXED_WORD_LIMIT = 6
 _frequency_maps: dict[str, dict] = {}
+_SPEECH_BOUNDARY_RE = re.compile(r".+?[.!?…。！？]+(?:\s+|$)", re.DOTALL)
 
 # Create the cv2_* tables once, lazily, so a DB hiccup never blocks app import.
 _tables_ready = False
@@ -85,6 +88,30 @@ def _ensure_tables() -> None:
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_cv2_session_user_id ON cv2_session (user_id)"))
     finally:
         _tables_ready = True
+
+
+def _complete_speech_segments(buffer: str) -> tuple[list[str], str]:
+    """Split complete sentences from a model stream, retaining an unfinished
+    tail for the next SSE chunk. The audio service accepts complete phrases,
+    not live model tokens, so sentence-sized clips keep pronunciation natural.
+    """
+    segments: list[str] = []
+    end = 0
+    for match in _SPEECH_BOUNDARY_RE.finditer(buffer):
+        segment = match.group(0)
+        if segment.strip():
+            segments.append(segment)
+        end = match.end()
+    return segments, buffer[end:]
+
+
+def _speech_sse(text: str) -> str:
+    """Encode a short Gemini-voice WAV clip for an SSE speech event."""
+    pcm = synthesize_tts(text, voice_name=_LIVE_VOICE)
+    if not pcm:
+        raise RuntimeError("TTS returned no audio")
+    wav_b64 = base64.b64encode(_wrap_pcm_as_wav(pcm)).decode("ascii")
+    return f"data: {json.dumps({'type': 'speech', 'text': text, 'audio': wav_b64})}\n\n"
 
 
 # --------------------------------------------------------------------------
@@ -587,11 +614,25 @@ def stream_opening(
     def event_stream():
         try:
             result = None
+            pending_speech = ""
             for kind, payload in svc.generate_opening_stream(profile, due_words, seed, body.language):
                 if kind == "chunk":
-                    yield f"data: {json.dumps({'type': 'chunk', 'text': payload})}\n\n"
+                    pending_speech += payload
+                    segments, pending_speech = _complete_speech_segments(pending_speech)
+                    for segment in segments:
+                        try:
+                            yield _speech_sse(segment)
+                        except Exception:
+                            # Preserve text streaming if a transient TTS call
+                            # fails; the frontend can still render the reply.
+                            yield f"data: {json.dumps({'type': 'chunk', 'text': segment})}\n\n"
                 else:
                     result = payload
+            if pending_speech.strip():
+                try:
+                    yield _speech_sse(pending_speech)
+                except Exception:
+                    yield f"data: {json.dumps({'type': 'chunk', 'text': pending_speech})}\n\n"
         except Exception as error:
             yield f"data: {json.dumps({'type': 'error', 'message': str(error)})}\n\n"
             return
@@ -808,14 +849,27 @@ def chat_turn_stream(
     def event_stream():
         result: Optional[dict] = None
         try:
+            pending_speech = ""
             for kind, payload in svc.generate_turn_stream(profile, due_words, history, req.text, req.language):
                 if kind == "chunk":
-                    yield f"data: {json.dumps({'type': 'chunk', 'text': payload})}\n\n"
+                    pending_speech += payload
+                    segments, pending_speech = _complete_speech_segments(pending_speech)
+                    for segment in segments:
+                        try:
+                            yield _speech_sse(segment)
+                        except Exception:
+                            yield f"data: {json.dumps({'type': 'chunk', 'text': segment})}\n\n"
                 else:
                     result = payload
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
             return
+
+        if pending_speech.strip():
+            try:
+                yield _speech_sse(pending_speech)
+            except Exception:
+                yield f"data: {json.dumps({'type': 'chunk', 'text': pending_speech})}\n\n"
 
         if result is None:
             yield f"data: {json.dumps({'type': 'error', 'message': 'No reply generated'})}\n\n"
