@@ -26,6 +26,11 @@ def me(current_user_and_flag: tuple[User, bool] = Depends(get_current_user_with_
     the frontend uses it to route a fresh Supabase sign-in (including the
     Google redirect flow, which discards any page-local navigation state)
     through onboarding instead of straight into the app.
+
+    An optional ?intent=signin|signup query param (set by the frontend right
+    after a Google OAuth redirect) makes this 404/409 instead when the result
+    doesn't match what the user actually clicked — see
+    get_current_user_from_token.
     """
     current_user, is_new = current_user_and_flag
     return UserResponse.model_validate(current_user, from_attributes=True).model_copy(update={"is_new_user": is_new})

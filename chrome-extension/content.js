@@ -884,6 +884,14 @@ async function sendSubtitlesToBackground(videoId, targetLang = preferredLanguage
       }, () => { try { void chrome.runtime.lastError; } catch (_) {} });
       console.log(`[ClipIt] Sent subtitles to background for ${videoId}`);
     } catch (_) {}
+  } else {
+    try {
+      chrome.runtime.sendMessage({
+        type: 'YOUTUBE_SUBTITLES_UNAVAILABLE',
+        videoId,
+        lang: targetLang,
+      }, () => { try { void chrome.runtime.lastError; } catch (_) {} });
+    } catch (_) {}
   }
 }
 

@@ -66,13 +66,20 @@ def verify_supabase_token(token: str) -> dict:
         )
 
 
-def get_current_user_from_token(token: str, db: Session) -> tuple[User, bool]:
+def get_current_user_from_token(token: str, db: Session, intent: str | None = None) -> tuple[User, bool]:
     """Return the app user mapped to a verified Supabase Auth subject.
 
     The first authenticated API request creates the local row, preserving the
     integer primary key expected by all existing application tables. The
     second element of the returned tuple is True only when this call is the
     one that created (or first-linked) the row.
+
+    ``intent`` optionally enforces which flow the caller claims to be
+    (Google OAuth always succeeds and silently provisions an Auth identity
+    regardless of whether the user clicked "Sign in" or "Sign up", so that
+    distinction has to be enforced here instead): "signin" rejects a result
+    that would create a brand-new account, and "signup" rejects a result that
+    resolves to an account that already existed.
     """
     payload = verify_supabase_token(token)
     try:
@@ -155,6 +162,16 @@ def get_current_user_from_token(token: str, db: Session) -> tuple[User, bool]:
                         user.supabase_user_id = supabase_user_id
                     db.commit()
                     db.refresh(user)
+    if intent == "signin" and is_new:
+        # Google's redirect already provisioned the Auth identity before we
+        # ever saw it; leave that alone and just refuse to create a local
+        # profile for an account that doesn't exist yet.
+        delete_local_user_data(db, user)
+        db.commit()
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="no_account")
+    if intent == "signup" and not is_new:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="account_exists")
+
     if not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -190,8 +207,12 @@ def get_current_user_optional(
 def get_current_user_with_new_flag(
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
     db: Session = Depends(get_db),
+    intent: str | None = None,
 ) -> tuple[User, bool]:
     """Same as get_current_user, but also reports whether this call is what
     created the local row — used by /auth/me to tell the frontend whether to
-    route a Supabase-redirect sign-in through onboarding."""
-    return get_current_user_from_token(credentials.credentials, db)
+    route a Supabase-redirect sign-in through onboarding.
+
+    ``intent`` is the optional ``?intent=signin|signup`` query param a fresh
+    Google-redirect request carries; see get_current_user_from_token."""
+    return get_current_user_from_token(credentials.credentials, db, intent)

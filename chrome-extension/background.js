@@ -436,7 +436,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           .catch(error => console.warn(`[ClipIt] Could not backfill title for ${msg.videoId}:`, error));
       }
       getActiveTrackingLanguage(msg.lang)
-        .then(lang => runVocabPipeline(msg.videoId, lang))
+        .then(() => ({ success: true, is_new: false }))
         .then(() => sendResponse({ success: true, is_new: false }));
     } else {
       recentlyTracked.set(msg.videoId, Date.now());
@@ -528,6 +528,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'YOUTUBE_SUBTITLES') {
     console.log(`[ClipIt] YOUTUBE_SUBTITLES received: ${msg.videoId} (lang: ${msg.subtitles?.targetLanguage || 'ko'}, target: ${(msg.subtitles?.korean || msg.subtitles?.ukrainian || []).length}, en: ${msg.subtitles?.english?.length || 0})`);
     processYouTubeSubtitles(msg.videoId, msg.subtitles).then(sendResponse);
+    return true;
+  }
+  if (msg.type === 'YOUTUBE_SUBTITLES_UNAVAILABLE') {
+    getActiveTrackingLanguage(msg.lang)
+      .then(async (lang) => {
+        await updateStatus(msg.videoId, lang, false);
+        return { success: true };
+      })
+      .then(sendResponse);
     return true;
   }
 });
@@ -756,7 +765,7 @@ async function processYouTubeSubtitles(videoId, subtitles) {
 
       // Now run vocab pipeline for the app-selected language only.
       if (targetSubtitles.length > 0) {
-        runVocabPipeline(videoId, targetLanguage);
+        runVocabPipeline(videoId, targetLanguage, true);
       }
 
       return { success: true };
@@ -795,8 +804,10 @@ async function trackAndPrefetch(videoId, title, lang = 'ko') {
     console.log(`[ClipIt] Tracked: ${videoId} — ${title} (new: ${data.is_new})`);
     void notifyAppVideoTracked(videoId, lang);
 
-    // 2. Run vocab pipeline for the app-selected language only.
-    runVocabPipeline(videoId, lang);
+    // The page content script reads YouTube's real signed caption-track URL.
+    // Starting a second generic timedtext request here loses auto-caption
+    // parameters such as `kind=asr` and can incorrectly mark a valid track
+    // unavailable before the page extractor finishes.
 
     return { success: true, is_new: data.is_new };
   } catch (e) {
@@ -805,7 +816,7 @@ async function trackAndPrefetch(videoId, title, lang = 'ko') {
   }
 }
 
-async function runVocabPipeline(videoId, lang = 'ko') {
+async function runVocabPipeline(videoId, lang = 'ko', captionsAlreadyUploaded = false) {
   console.log(`[ClipIt] runVocabPipeline starting: ${videoId} (${lang})`);
   const token = await getAuthToken();
   const cacheKey = `vocab_${lang}_${videoId}`;
@@ -825,7 +836,7 @@ async function runVocabPipeline(videoId, lang = 'ko') {
 
   try {
     // Step 1: fetch subtitles (skip for Netflix - already captured)
-    if (!videoId.startsWith('netflix_')) {
+    if (!videoId.startsWith('netflix_') && !captionsAlreadyUploaded) {
       const config = getLanguageConfig(lang);
       console.log(`[Deadbird] Fetching subtitles for ${videoId} (${config.name})`);
 
